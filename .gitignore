@@ -43,3 +43,9 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Local debug screenshots
+/debug/
+
+# Qoder IDE files (auto-generated repowiki docs, agents, cache)
+.qoder/
