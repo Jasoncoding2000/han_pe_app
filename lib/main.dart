@@ -164,6 +164,7 @@ class _ScreenerPageState extends State<ScreenerPage> {
   final AudioPlayer _audio = AudioPlayer();
   List<StockData> _bigList = [];   // 超低大换手
   List<StockData> _smallList = []; // 超低小换手
+  List<StockData> _exitList = [];  // 出场参考: all hanPE-qualified (sorted ascending)
   String _status = '';
   bool _running = false;
 
@@ -180,7 +181,7 @@ class _ScreenerPageState extends State<ScreenerPage> {
   }
 
   Future<void> _runScreener() async {
-    setState(() { _running = true; _status = 'Starting...'; _bigList = []; _smallList = []; });
+    setState(() { _running = true; _status = 'Starting...'; _bigList = []; _smallList = []; _exitList = []; });
     try {
       setState(() => _status = 'Fetching industry sectors...');
       final sectors = await _service.fetchSectors();
@@ -217,12 +218,15 @@ class _ScreenerPageState extends State<ScreenerPage> {
       final small = enriched.where((c) => c.weekYearRatio <= smallRatioMax).toList()
         ..sort((a, b) => a.weekYearRatio.compareTo(b.weekYearRatio));
       final midCount = enriched.where((c) => c.weekYearRatio > smallRatioMax && c.weekYearRatio < bigRatioMin).length;
+      // 出场参考: all hanPE-qualified stocks sorted by hanPE ascending
+      final exitList = List<StockData>.from(enriched)..sort((a, b) => a.hanPe.compareTo(b.hanPe));
       setState(() {
         _bigList = big;
         _smallList = small;
+        _exitList = exitList;
         _status = enriched.isEmpty
             ? 'No stocks passed all filters today.'
-            : '大换手 ${big.length}  |  小换手 ${small.length}  |  正常区间 $midCount  (hanPE < $hanpeThreshold: ${enriched.length})';
+            : '大换手 ${big.length}  |  小换手 ${small.length}  |  正常区间 $midCount  |  出场参考 ${exitList.length}';
       });
       await _notify();
     } catch (e) { setState(() => _status = 'Error: $e'); }
@@ -250,7 +254,7 @@ class _ScreenerPageState extends State<ScreenerPage> {
             Text(_status, style: const TextStyle(fontSize: 12, color: textMuted)),
           ]),
         ),
-        if (_bigList.isNotEmpty || _smallList.isNotEmpty) _buildSections(),
+        if (_bigList.isNotEmpty || _smallList.isNotEmpty || _exitList.isNotEmpty) _buildSections(),
       ]),
     );
   }
@@ -264,6 +268,9 @@ class _ScreenerPageState extends State<ScreenerPage> {
         const SizedBox(height: 12),
         _sectionHeader('超低小换手', _smallList.length),
         ..._smallList.map(_buildCard),
+        const SizedBox(height: 12),
+        _sectionHeader('出场参考 (hanPE合格)', _exitList.length),
+        ..._exitList.map(_buildCard),
       ],
     ));
   }
