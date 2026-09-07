@@ -1,3 +1,4 @@
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:audioplayers/audioplayers.dart';
@@ -12,6 +13,15 @@ const int weekDays = 5; // trading days per week
 const int yearDays = 250; // trading days per year
 const String sinaBase = 'https://vip.stock.finance.sina.com.cn';
 const String klineBase = 'https://quotes.sina.cn';
+
+// V-shape detection parameters
+const int vsMinDropPct = 20;
+const int vsMinRecoveryPct = 30;
+const int vsMaxRecoveryPct = 100;
+const int vsMinLegDays = 15;
+const double vsMinR2 = 0.50;
+const int vsMaxBottomAge = 90;
+const Color accentOrange = Color(0xFFFF9800);
 
 const Color bgBlack = Color(0xFF000000);
 const Color textOffWhite = Color(0xFFE0E0E0);
@@ -38,7 +48,7 @@ class HanPeApp extends StatelessWidget {
         ),
         useMaterial3: true, brightness: Brightness.dark,
       ),
-      home: const ScreenerPage(),
+      home: const TabbedPage(),
     );
   }
 }
@@ -47,7 +57,10 @@ class StockData {
   final String code, name, industry;
   final double price, pe, turnover;
   double industryMedianPe, hanPe;
-  double weekYearRatio = 0, weekChangePct = 0; // 周均量/年均量, 周涨跌%
+  double weekYearRatio = 0, weekChangePct = 0;
+  double peakVal = 0, bottomVal = 0, recoveryPct = 0;
+  double descentR2 = 0, ascentR2 = 0, steepnessRatio = 0;
+  int peakIdx = 0, bottomIdx = 0, bottomAge = 0;
   StockData({required this.code, required this.name, required this.price, required this.pe, required this.turnover, required this.industry, this.industryMedianPe = 0, this.hanPe = 0});
 }
 
@@ -153,18 +166,95 @@ class ScreenerEngine {
   static double _med(List<double> v) { final s = List<double>.from(v)..sort(); final m = s.length ~/ 2; return s.length.isOdd ? s[m] : (s[m-1]+s[m])/2; }
 }
 
-class ScreenerPage extends StatefulWidget {
-  const ScreenerPage({super.key});
-  @override
-  State<ScreenerPage> createState() => _ScreenerPageState();
+class VShapeEngine {
+  static double _r2(List<double> values) {
+    final n = values.length;
+    if (n < 3) return 0.0;
+    final meanY = values.reduce((a, b) => a + b) / n;
+    var ssTot = 0.0;
+    for (final y in values) { ssTot += (y - meanY) * (y - meanY); }
+    if (ssTot < 1e-12) return 0.0;
+    var ssRes = 0.0;
+    for (int i = 0; i < n; i++) {
+      final yHat = values[0] + (values[n - 1] - values[0]) * i / (n - 1);
+      ssRes += (values[i] - yHat) * (values[i] - yHat);
+    }
+    return (1.0 - ssRes / ssTot).clamp(0.0, 1.0);
+  }
+
+  static Map<String, dynamic>? detect(List<KlineDay> days) {
+    if (days.length < 60) return null;
+    final closes = days.map((d) => d.close).toList();
+    final n = closes.length;
+    final bottomVal = closes.reduce((a, b) => a < b ? a : b);
+    final bottomIdx = closes.indexOf(bottomVal);
+    if (bottomIdx < vsMinLegDays || bottomIdx > n - vsMinLegDays - 1) return null;
+    final peakSlice = closes.sublist(0, bottomIdx + 1);
+    final peakVal = peakSlice.reduce((a, b) => a > b ? a : b);
+    final peakIdx = closes.indexOf(peakVal);
+    if (bottomIdx - peakIdx < vsMinLegDays) return null;
+    final current = closes.last;
+    final dropPct = (peakVal - bottomVal) / peakVal * 100;
+    if (dropPct < vsMinDropPct) return null;
+    final recoveryAmt = current - bottomVal;
+    final dropAmt = peakVal - bottomVal;
+    if (dropAmt <= 0) return null;
+    final recoveryPct = recoveryAmt / dropAmt * 100;
+    if (recoveryPct < vsMinRecoveryPct || recoveryPct >= vsMaxRecoveryPct) return null;
+    final descentDays = bottomIdx - peakIdx;
+    final ascentDays = n - 1 - bottomIdx;
+    if (descentDays < 1 || ascentDays < 1) return null;
+    final descentRate = dropPct / descentDays;
+    final ascentRate = (recoveryAmt / bottomVal * 100) / ascentDays;
+    if (ascentRate <= descentRate) return null;
+    final r2d = _r2(closes.sublist(peakIdx, bottomIdx + 1));
+    final r2a = _r2(closes.sublist(bottomIdx));
+    if (r2d < vsMinR2 || r2a < vsMinR2) return null;
+    final bottomAge = n - 1 - bottomIdx;
+    if (bottomAge > vsMaxBottomAge) return null;
+    return {
+      'peakIdx': peakIdx, 'peakVal': peakVal,
+      'bottomIdx': bottomIdx, 'bottomVal': bottomVal,
+      'recoveryPct': recoveryPct, 'descentR2': r2d, 'ascentR2': r2a,
+      'steepnessRatio': ascentRate / descentRate, 'bottomAge': bottomAge,
+    };
+  }
 }
 
-class _ScreenerPageState extends State<ScreenerPage> {
+class TabbedPage extends StatelessWidget {
+  const TabbedPage({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('hanPE Screener'), centerTitle: true,
+          bottom: const TabBar(
+            tabs: [Tab(text: 'hanPE'), Tab(text: 'V-Shape')],
+            indicatorColor: accentBlue,
+            labelColor: accentBlue,
+            unselectedLabelColor: textMuted,
+          ),
+        ),
+        body: const TabBarView(children: [HanPePage(), VShapePage()]),
+      ),
+    );
+  }
+}
+
+class HanPePage extends StatefulWidget {
+  const HanPePage({super.key});
+  @override
+  State<HanPePage> createState() => _HanPePageState();
+}
+
+class _HanPePageState extends State<HanPePage> {
   final SinaService _service = SinaService();
   final AudioPlayer _audio = AudioPlayer();
-  List<StockData> _bigList = [];   // 超低大换手
-  List<StockData> _smallList = []; // 超低小换手
-  List<StockData> _exitList = [];  // 出场参考: all hanPE-qualified (sorted ascending)
+  List<StockData> _bigList = [];
+  List<StockData> _smallList = [];
+  List<StockData> _exitList = [];
   String _status = '';
   bool _running = false;
 
@@ -194,7 +284,6 @@ class _ScreenerPageState extends State<ScreenerPage> {
       }
       setState(() => _status = 'Processing ${allRows.length} rows...');
       final cands = ScreenerEngine.run(allRows);
-      // Enrich each hanPE candidate with 1-year daily history (周年比, 周涨幅)
       final enriched = <StockData>[];
       for (int i = 0; i < cands.length; i++) {
         final c = cands[i];
@@ -211,14 +300,11 @@ class _ScreenerPageState extends State<ScreenerPage> {
           enriched.add(c);
         } catch (_) {}
       }
-      // 超低大换手: 周年比 ≥ 2× + up for the week, most active first
       final big = enriched.where((c) => c.weekYearRatio >= bigRatioMin && c.weekChangePct > 0).toList()
         ..sort((a, b) => b.weekYearRatio.compareTo(a.weekYearRatio));
-      // 超低小换手: 周年比 ≤ ½×, quietest first
       final small = enriched.where((c) => c.weekYearRatio <= smallRatioMax).toList()
         ..sort((a, b) => a.weekYearRatio.compareTo(b.weekYearRatio));
       final midCount = enriched.where((c) => c.weekYearRatio > smallRatioMax && c.weekYearRatio < bigRatioMin).length;
-      // 出场参考: all hanPE-qualified stocks sorted by hanPE ascending
       final exitList = List<StockData>.from(enriched)..sort((a, b) => a.hanPe.compareTo(b.hanPe));
       setState(() {
         _bigList = big;
@@ -240,23 +326,21 @@ class _ScreenerPageState extends State<ScreenerPage> {
   Widget build(BuildContext context) {
     final today = DateTime.now();
     final dateStr = '${today.year}-${today.month.toString().padLeft(2,'0')}-${today.day.toString().padLeft(2,'0')}';
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('hanPE Screener'), centerTitle: true,
-        actions: [IconButton(icon: _running ? const SizedBox(width:20,height:20,child:CircularProgressIndicator(strokeWidth:2,color:textOffWhite)) : const Icon(Icons.refresh), onPressed: _running ? null : _runScreener, tooltip: 'Refresh')],
-      ),
-      body: Column(children: [
-        Padding(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.center, children: [
+    return Column(children: [
+      Padding(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.center, children: [
+          Row(children: [
             Text(dateStr, style: const TextStyle(color: textMuted, fontSize: 12)),
-            const Text('hanPE < 0.3  |  大换手: 周年比≥2+周涨  |  小换手: 周年比≤0.5', style: TextStyle(color: textMuted, fontSize: 11)),
-            const SizedBox(height: 6),
-            Text(_status, style: const TextStyle(fontSize: 12, color: textMuted)),
+            const Spacer(),
+            _running ? const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2,color:textMuted)) : GestureDetector(onTap: _runScreener, child: const Icon(Icons.refresh, size: 18, color: textMuted)),
           ]),
-        ),
-        if (_bigList.isNotEmpty || _smallList.isNotEmpty || _exitList.isNotEmpty) _buildSections(),
-      ]),
-    );
+          const Text('hanPE < 0.3  |  大换手: 周年比≥2+周涨  |  小换手: 周年比≤0.5', style: TextStyle(color: textMuted, fontSize: 11)),
+          const SizedBox(height: 6),
+          Text(_status, style: const TextStyle(fontSize: 12, color: textMuted)),
+        ]),
+      ),
+      if (_bigList.isNotEmpty || _smallList.isNotEmpty || _exitList.isNotEmpty) _buildSections(),
+    ]);
   }
 
   Widget _buildSections() {
@@ -287,7 +371,6 @@ class _ScreenerPageState extends State<ScreenerPage> {
   }
 
   Widget _buildCard(StockData s) {
-    // A-share convention: red = up, green = down
     final chgColor = s.weekChangePct > 0 ? const Color(0xFFEF5350) : (s.weekChangePct < 0 ? const Color(0xFF66BB6A) : textMuted);
     return Container(margin: const EdgeInsets.only(bottom: 6), padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(color: cardBg, borderRadius: BorderRadius.circular(8), border: Border.all(color: cardBorder)),
@@ -305,6 +388,148 @@ class _ScreenerPageState extends State<ScreenerPage> {
         ),
         const SizedBox(height: 4),
         Row(children: [const Text('行业', style: TextStyle(color: textMuted, fontSize: 10)), const SizedBox(width: 4), Expanded(child: Text(s.industry, style: const TextStyle(color: textOffWhite, fontSize: 11)))]),
+      ]),
+    );
+  }
+}
+
+class VShapePage extends StatefulWidget {
+  const VShapePage({super.key});
+  @override
+  State<VShapePage> createState() => _VShapePageState();
+}
+
+class _VShapePageState extends State<VShapePage> {
+  final SinaService _service = SinaService();
+  final AudioPlayer _audio = AudioPlayer();
+  List<StockData> _results = [];
+  String _status = '';
+  bool _running = false;
+
+  @override
+  void initState() { super.initState(); _runScreener(); }
+
+  Future<void> _notify() async {
+    await HapticFeedback.heavyImpact();
+    await Future.delayed(const Duration(milliseconds: 150));
+    await HapticFeedback.heavyImpact();
+    await Future.delayed(const Duration(milliseconds: 150));
+    await HapticFeedback.heavyImpact();
+    await _audio.play(AssetSource('beep.wav'), volume: 1.0);
+  }
+
+  Future<void> _runScreener() async {
+    setState(() { _running = true; _status = 'Starting...'; _results = []; });
+    try {
+      setState(() => _status = 'Fetching sectors...');
+      final sectors = await _service.fetchSectors();
+      setState(() => _status = 'Found ${sectors.length} industries. Fetching stocks...');
+      var allRows = <StockData>[];
+      for (int i = 0; i < sectors.length; i++) {
+        final s = sectors[i];
+        setState(() => _status = '[${i+1}/${sectors.length}] ${s['name']}...');
+        try { allRows.addAll(await _service.fetchSectorStocks(s['label']!, s['name']!)); } catch (_) {}
+      }
+      // Exclude ST/*ST, delisting, B-shares
+      final filtered = allRows.where((s) =>
+        !RegExp(r'ST|st|\*ST|退', caseSensitive: false).hasMatch(s.name) &&
+        !s.code.startsWith('200')
+      ).toList();
+      setState(() => _status = 'Scanning ${filtered.length} stocks for V-shapes...');
+      final candidates = <StockData>[];
+      for (int i = 0; i < filtered.length; i++) {
+        final s = filtered[i];
+        if (i % 100 == 0) setState(() => _status = 'V-Shape [$i/${filtered.length}]...');
+        try {
+          final days = await _service.fetchKline(s.code);
+          final result = VShapeEngine.detect(days);
+          if (result != null) {
+            s.peakVal = result['peakVal'];
+            s.bottomVal = result['bottomVal'];
+            s.peakIdx = result['peakIdx'];
+            s.bottomIdx = result['bottomIdx'];
+            s.recoveryPct = result['recoveryPct'];
+            s.descentR2 = result['descentR2'];
+            s.ascentR2 = result['ascentR2'];
+            s.steepnessRatio = result['steepnessRatio'];
+            s.bottomAge = result['bottomAge'];
+            candidates.add(s);
+          }
+        } catch (_) {}
+      }
+      candidates.sort((a, b) => b.steepnessRatio.compareTo(a.steepnessRatio));
+      setState(() {
+        _results = candidates;
+        _status = candidates.isEmpty
+            ? 'No V-shaped stocks found today.'
+            : 'Found ${candidates.length} V-shaped recoveries';
+      });
+      await _notify();
+    } catch (e) { setState(() => _status = 'Error: $e'); }
+    finally { setState(() => _running = false); }
+  }
+
+  @override
+  void dispose() { _service.dispose(); _audio.dispose(); super.dispose(); }
+
+  @override
+  Widget build(BuildContext context) {
+    final today = DateTime.now();
+    final dateStr = '${today.year}-${today.month.toString().padLeft(2,'0')}-${today.day.toString().padLeft(2,'0')}';
+    return Column(children: [
+      Padding(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.center, children: [
+          Row(children: [
+            Text(dateStr, style: const TextStyle(color: textMuted, fontSize: 12)),
+            const Spacer(),
+            _running ? const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2,color:textMuted)) : GestureDetector(onTap: _runScreener, child: const Icon(Icons.refresh, size: 18, color: textMuted)),
+          ]),
+          const Text('Drop>=20%  Recovery>=30%  Ascent>Descent  R2>=0.5  Bottom<=90d', style: TextStyle(color: textMuted, fontSize: 10)),
+          const SizedBox(height: 6),
+          Text(_status, style: const TextStyle(fontSize: 12, color: textMuted)),
+        ]),
+      ),
+      if (_results.isNotEmpty) Expanded(child: ListView.builder(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        itemCount: _results.length,
+        itemBuilder: (context, i) => _VCard(_results[i]),
+      )),
+    ]);
+  }
+}
+
+class _VCard extends StatelessWidget {
+  final StockData s;
+  const _VCard(this.s);
+  @override
+  Widget build(BuildContext context) {
+    final dropPct = s.peakVal > 0 ? (s.peakVal - s.bottomVal) / s.peakVal * 100 : 0.0;
+    return Container(margin: const EdgeInsets.only(bottom: 6), padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(color: cardBg, borderRadius: BorderRadius.circular(8), border: Border.all(color: cardBorder)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Text(s.code, style: const TextStyle(color: textOffWhite, fontSize: 13, fontWeight: FontWeight.w600)),
+          const SizedBox(width: 8),
+          Expanded(child: Text(s.name, style: const TextStyle(color: textOffWhite, fontSize: 13))),
+          Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(color: accentOrange.withOpacity(0.15), borderRadius: BorderRadius.circular(4)),
+            child: Text('${s.steepnessRatio.toStringAsFixed(1)}x', style: const TextStyle(color: accentOrange, fontSize: 12, fontWeight: FontWeight.bold))),
+        ]),
+        const SizedBox(height: 8),
+        Row(children: [
+          _M('Peak', s.peakVal.toStringAsFixed(2)),
+          _M('Bottom', s.bottomVal.toStringAsFixed(2)),
+          _M('Current', s.price.toStringAsFixed(2)),
+          _M('Drop', '${dropPct.toStringAsFixed(0)}%'),
+          _M('Recovery', '${s.recoveryPct.toStringAsFixed(0)}%'),
+        ]),
+        const SizedBox(height: 4),
+        Row(children: [
+          _M('Descent R2', s.descentR2.toStringAsFixed(2)),
+          _M('Ascent R2', s.ascentR2.toStringAsFixed(2)),
+          _M('Bottom', '${s.bottomAge}d ago'),
+          _M('行业', s.industry),
+        ]),
       ]),
     );
   }
