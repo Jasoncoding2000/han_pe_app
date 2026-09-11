@@ -350,10 +350,10 @@ class _TabbedPageState extends State<TabbedPage> {
       });
       return;
     }
-    await Future.wait([
-      _runHanPeScreener(allRows),
-      _runVShapeScreener(allRows),
-    ]);
+    // Run sequentially: hanPE first (fast), then V-Shape (slow ~3000 klines)
+    // Both share the same http.Client, so concurrent kline requests overwhelm it
+    await _runHanPeScreener(allRows);
+    await _runVShapeScreener(allRows);
   }
   
   Future<void> _runHanPeScreener(List<StockData> allRows) async {
