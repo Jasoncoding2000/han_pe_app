@@ -1,5 +1,6 @@
 import os
 code = r"""
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:audioplayers/audioplayers.dart';
@@ -24,12 +25,12 @@ const double vsMinR2 = 0.50;
 const int vsMaxBottomAge = 90;
 const Color accentOrange = Color(0xFFFF9800);
 
-const Color bgBlack = Color(0xFF000000);
-const Color textOffWhite = Color(0xFFE0E0E0);
-const Color textMuted = Color(0xFF9E9E9E);
-const Color accentBlue = Color(0xFF42A5F5);
-const Color cardBg = Color(0xFF111111);
-const Color cardBorder = Color(0xFF222222);
+const Color bgBlack = Color(0xFF1A1A2E);  // Dark blue-grey (brightened for visibility)
+const Color textOffWhite = Color(0xFFF0F0F0);  // Near-white (brightened)
+const Color textMuted = Color(0xFFB0B0B0);  // Light grey (brightened from #9E9E9E)
+const Color accentBlue = Color(0xFF64B5F6);  // Lighter blue (brightened)
+const Color cardBg = Color(0xFF252540);  // Dark purple-grey (brightened)
+const Color cardBorder = Color(0xFF404060);  // Visible border (brightened)
 
 void main() => runApp(const HanPeApp());
 
@@ -72,9 +73,26 @@ class KlineDay {
 
 class SinaService {
   final client = http.Client();
-  Future<String> _getGbk(String path) async {
-    final resp = await client.get(Uri.parse(sinaBase + path)).timeout(const Duration(seconds: 15));
-    return gbk_bytes.decode(resp.bodyBytes);
+  Future<String> _getGbk(String path, {int retries = 3}) async {
+    print('[HTTP] GET $sinaBase$path');
+    final stopwatch = Stopwatch()..start();
+    for (int attempt = 1; attempt <= retries; attempt++) {
+      try {
+        final resp = await client.get(Uri.parse(sinaBase + path)).timeout(const Duration(seconds: 15));
+        stopwatch.stop();
+        print('[HTTP] Response in ${stopwatch.elapsedMilliseconds}ms, status: ${resp.statusCode}, bytes: ${resp.bodyBytes.length}');
+        return gbk_bytes.decode(resp.bodyBytes);
+      } catch (e) {
+        print('[HTTP] Attempt $attempt/$retries failed after ${stopwatch.elapsedMilliseconds}ms: $e');
+        if (attempt == retries) {
+          stopwatch.stop();
+          print('[HTTP] ERROR: All $retries attempts failed');
+          rethrow;
+        }
+        await Future.delayed(Duration(seconds: attempt));  // Exponential backoff
+      }
+    }
+    throw Exception('Unreachable');
   }
   Future<List<Map<String, String>>> fetchSectors() async {
     final text = await _getGbk('/q/view/newSinaHy.php');
@@ -94,9 +112,19 @@ class SinaService {
     while (true) {
       final path = '/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=$page&num=$num&sort=symbol&asc=1&node=$node&_s_r_a=page';
       String body;
-      try { body = await _getGbk(path); } catch (_) { break; }
+      try { 
+        body = await _getGbk(path); 
+      } catch (e) { 
+        print('[SECTOR] Error fetching page $page for $industryName: $e');
+        break; 
+      }
       List<dynamic> data;
-      try { data = json.decode(body); } catch (_) { break; }
+      try { 
+        data = json.decode(body); 
+      } catch (e) { 
+        print('[SECTOR] JSON decode error for $industryName page $page: $e');
+        break; 
+      }
       if (data.isEmpty) break;
       for (final item in data) {
         final symbol = (item['symbol'] as String? ?? '').replaceAll(RegExp(r'^(sh|sz)'), '');
@@ -112,6 +140,7 @@ class SinaService {
       if (data.length < num) break;
       page++;
     }
+    print('[SECTOR] $industryName: fetched ${stocks.length} stocks');
     return stocks;
   }
   // Daily k-line (close + volume), last ~250 trading days.
@@ -185,34 +214,75 @@ class VShapeEngine {
 
   static Map<String, dynamic>? detect(List<KlineDay> days) {
     if (days.length < 60) return null;
-    final closes = days.map((d) => d.close).toList();
+    
+    // Validate data: filter out invalid entries
+    final closes = <double>[];
+    for (final d in days) {
+      if (d.close > 0 && d.close.isFinite) {
+        closes.add(d.close);
+      }
+    }
+    
+    if (closes.length < 60) {
+      print('[VSHAPE] Insufficient valid data points: ${closes.length}/${days.length}');
+      return null;
+    }
+    
     final n = closes.length;
     final bottomVal = closes.reduce((a, b) => a < b ? a : b);
     final bottomIdx = closes.indexOf(bottomVal);
-    if (bottomIdx < vsMinLegDays || bottomIdx > n - vsMinLegDays - 1) return null;
-    final peakSlice = closes.sublist(0, bottomIdx + 1);
+    
+    // Validate bottom position
+    if (bottomIdx < vsMinLegDays || bottomIdx > n - vsMinLegDays - 1) {
+      return null;
+    }
+    
+    // Find peak BEFORE bottom (not in entire range)
+    final peakSlice = closes.sublist(0, bottomIdx);
+    if (peakSlice.isEmpty) return null;
+    
     final peakVal = peakSlice.reduce((a, b) => a > b ? a : b);
-    final peakIdx = closes.indexOf(peakVal);
+    final peakIdx = closes.indexOf(peakVal);  // Find first occurrence of peak value
+    
+    // Validate peak is before bottom and has enough days between them
+    if (peakIdx >= bottomIdx) {
+      print('[VSHAPE] Invalid peak/bottom order: peakIdx=$peakIdx, bottomIdx=$bottomIdx');
+      return null;
+    }
     if (bottomIdx - peakIdx < vsMinLegDays) return null;
+    
     final current = closes.last;
     final dropPct = (peakVal - bottomVal) / peakVal * 100;
     if (dropPct < vsMinDropPct) return null;
+    
     final recoveryAmt = current - bottomVal;
     final dropAmt = peakVal - bottomVal;
     if (dropAmt <= 0) return null;
+    
     final recoveryPct = recoveryAmt / dropAmt * 100;
     if (recoveryPct < vsMinRecoveryPct || recoveryPct >= vsMaxRecoveryPct) return null;
+    
     final descentDays = bottomIdx - peakIdx;
     final ascentDays = n - 1 - bottomIdx;
     if (descentDays < 1 || ascentDays < 1) return null;
+    
     final descentRate = dropPct / descentDays;
     final ascentRate = (recoveryAmt / bottomVal * 100) / ascentDays;
     if (ascentRate <= descentRate) return null;
+    
+    // Validate sublist ranges before calling _r2
+    if (peakIdx >= bottomIdx + 1) {
+      print('[VSHAPE] Invalid sublist range for descent: peakIdx=$peakIdx, bottomIdx=$bottomIdx');
+      return null;
+    }
+    
     final r2d = _r2(closes.sublist(peakIdx, bottomIdx + 1));
     final r2a = _r2(closes.sublist(bottomIdx));
     if (r2d < vsMinR2 || r2a < vsMinR2) return null;
+    
     final bottomAge = n - 1 - bottomIdx;
     if (bottomAge > vsMaxBottomAge) return null;
+    
     return {
       'peakIdx': peakIdx, 'peakVal': peakVal,
       'bottomIdx': bottomIdx, 'bottomVal': bottomVal,
@@ -272,17 +342,22 @@ class _HanPePageState extends State<HanPePage> {
   }
 
   Future<void> _runScreener() async {
+    print('[SCREENER] Starting...');
     setState(() { _running = true; _status = 'Starting...'; _bigList = []; _smallList = []; _exitList = []; });
     try {
+      print('[SCREENER] Fetching sectors...');
       setState(() => _status = 'Fetching industry sectors...');
       final sectors = await _service.fetchSectors();
+      print('[SCREENER] Found ${sectors.length} sectors');
       setState(() => _status = 'Found ${sectors.length} industries. Fetching stocks...');
       var allRows = <StockData>[];
       for (int i = 0; i < sectors.length; i++) {
         final s = sectors[i];
+        print('[SCREENER] Fetching stocks for sector ${i+1}/${sectors.length}: ${s['name']}');
         setState(() => _status = '[${i+1}/${sectors.length}] ${s['name']}...');
-        try { allRows.addAll(await _service.fetchSectorStocks(s['label']!, s['name']!)); } catch (_) {}
+        try { allRows.addAll(await _service.fetchSectorStocks(s['label']!, s['name']!)); } catch (e) { print('[SCREENER] Error fetching stocks: $e'); }
       }
+      print('[SCREENER] Total rows: ${allRows.length}');
       setState(() => _status = 'Processing ${allRows.length} rows...');
       final cands = ScreenerEngine.run(allRows);
       final enriched = <StockData>[];
@@ -316,8 +391,15 @@ class _HanPePageState extends State<HanPePage> {
             : '大换手 ${big.length}  |  小换手 ${small.length}  |  正常区间 $midCount  |  出场参考 ${exitList.length}';
       });
       await _notify();
-    } catch (e) { setState(() => _status = 'Error: $e'); }
-    finally { setState(() => _running = false); }
+      print('[SCREENER] Completed successfully');
+    } catch (e) { 
+      print('[SCREENER] ERROR: $e');
+      setState(() => _status = 'Error: $e'); 
+    }
+    finally { 
+      print('[SCREENER] Finished, running=false');
+      setState(() => _running = false); 
+    }
   }
 
   @override
@@ -437,12 +519,18 @@ class _VShapePageState extends State<VShapePage> {
         !s.code.startsWith('200')
       ).toList();
       setState(() => _status = 'Scanning ${filtered.length} stocks for V-shapes...');
+      print('[VSHAPE] Scanning ${filtered.length} stocks');
       final candidates = <StockData>[];
+      int klineErrors = 0;
       for (int i = 0; i < filtered.length; i++) {
         final s = filtered[i];
         if (i % 100 == 0) setState(() => _status = 'V-Shape [$i/${filtered.length}]...');
         try {
           final days = await _service.fetchKline(s.code);
+          if (days.length < 60) {
+            print('[VSHAPE] ${s.code} ${s.name}: insufficient data (${days.length} days)');
+            continue;
+          }
           final result = VShapeEngine.detect(days);
           if (result != null) {
             s.peakVal = result['peakVal'];
@@ -455,9 +543,14 @@ class _VShapePageState extends State<VShapePage> {
             s.steepnessRatio = result['steepnessRatio'];
             s.bottomAge = result['bottomAge'];
             candidates.add(s);
+            print('[VSHAPE] FOUND: ${s.code} ${s.name} - drop: ${((result['peakVal'] - result['bottomVal']) / result['peakVal'] * 100).toStringAsFixed(1)}%, recovery: ${result['recoveryPct'].toStringAsFixed(1)}%, R2d: ${result['descentR2'].toStringAsFixed(2)}, R2a: ${result['ascentR2'].toStringAsFixed(2)}, steepness: ${result['steepnessRatio'].toStringAsFixed(2)}x');
           }
-        } catch (_) {}
+        } catch (e) {
+          klineErrors++;
+          if (klineErrors <= 10) print('[VSHAPE] Error fetching kline for ${s.code}: $e');
+        }
       }
+      print('[VSHAPE] Scan complete: ${candidates.length} candidates, $klineErrors kline errors');
       candidates.sort((a, b) => b.steepnessRatio.compareTo(a.steepnessRatio));
       setState(() {
         _results = candidates;
@@ -548,7 +641,9 @@ class _M extends StatelessWidget {
     ]));
   }
 }
+
 """
-with open('lib/main.dart', 'w', encoding='utf-8') as f:
-    f.write(code)
-print('Written', len(code), 'chars')
+path = os.path.join(os.path.dirname(__file__), 'lib', 'main.dart')
+with open(path, 'w', encoding='utf-8') as f:
+    f.write(code.strip())
+print(f'Written {len(code)} chars')
