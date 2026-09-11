@@ -23,12 +23,12 @@ const double vsMinR2 = 0.50;
 const int vsMaxBottomAge = 90;
 const Color accentOrange = Color(0xFFFF9800);
 
-const Color bgBlack = Color(0xFF000000);
-const Color textOffWhite = Color(0xFFE0E0E0);
-const Color textMuted = Color(0xFF9E9E9E);
-const Color accentBlue = Color(0xFF42A5F5);
-const Color cardBg = Color(0xFF111111);
-const Color cardBorder = Color(0xFF222222);
+const Color bgBlack = Color(0xFF1A1A2E);  // Dark blue-grey (brightened for visibility)
+const Color textOffWhite = Color(0xFFF0F0F0);  // Near-white (brightened)
+const Color textMuted = Color(0xFFB0B0B0);  // Light grey (brightened from #9E9E9E)
+const Color accentBlue = Color(0xFF64B5F6);  // Lighter blue (brightened)
+const Color cardBg = Color(0xFF252540);  // Dark purple-grey (brightened)
+const Color cardBorder = Color(0xFF404060);  // Visible border (brightened)
 
 void main() => runApp(const HanPeApp());
 
@@ -72,8 +72,18 @@ class KlineDay {
 class SinaService {
   final client = http.Client();
   Future<String> _getGbk(String path) async {
-    final resp = await client.get(Uri.parse(sinaBase + path)).timeout(const Duration(seconds: 15));
-    return gbk_bytes.decode(resp.bodyBytes);
+    print('[HTTP] GET $sinaBase$path');
+    final stopwatch = Stopwatch()..start();
+    try {
+      final resp = await client.get(Uri.parse(sinaBase + path)).timeout(const Duration(seconds: 15));
+      stopwatch.stop();
+      print('[HTTP] Response in ${stopwatch.elapsedMilliseconds}ms, status: ${resp.statusCode}, bytes: ${resp.bodyBytes.length}');
+      return gbk_bytes.decode(resp.bodyBytes);
+    } catch (e) {
+      stopwatch.stop();
+      print('[HTTP] ERROR after ${stopwatch.elapsedMilliseconds}ms: $e');
+      rethrow;
+    }
   }
   Future<List<Map<String, String>>> fetchSectors() async {
     final text = await _getGbk('/q/view/newSinaHy.php');
@@ -271,17 +281,22 @@ class _HanPePageState extends State<HanPePage> {
   }
 
   Future<void> _runScreener() async {
+    print('[SCREENER] Starting...');
     setState(() { _running = true; _status = 'Starting...'; _bigList = []; _smallList = []; _exitList = []; });
     try {
+      print('[SCREENER] Fetching sectors...');
       setState(() => _status = 'Fetching industry sectors...');
       final sectors = await _service.fetchSectors();
+      print('[SCREENER] Found ${sectors.length} sectors');
       setState(() => _status = 'Found ${sectors.length} industries. Fetching stocks...');
       var allRows = <StockData>[];
       for (int i = 0; i < sectors.length; i++) {
         final s = sectors[i];
+        print('[SCREENER] Fetching stocks for sector ${i+1}/${sectors.length}: ${s['name']}');
         setState(() => _status = '[${i+1}/${sectors.length}] ${s['name']}...');
-        try { allRows.addAll(await _service.fetchSectorStocks(s['label']!, s['name']!)); } catch (_) {}
+        try { allRows.addAll(await _service.fetchSectorStocks(s['label']!, s['name']!)); } catch (e) { print('[SCREENER] Error fetching stocks: $e'); }
       }
+      print('[SCREENER] Total rows: ${allRows.length}');
       setState(() => _status = 'Processing ${allRows.length} rows...');
       final cands = ScreenerEngine.run(allRows);
       final enriched = <StockData>[];
@@ -315,8 +330,15 @@ class _HanPePageState extends State<HanPePage> {
             : '大换手 ${big.length}  |  小换手 ${small.length}  |  正常区间 $midCount  |  出场参考 ${exitList.length}';
       });
       await _notify();
-    } catch (e) { setState(() => _status = 'Error: $e'); }
-    finally { setState(() => _running = false); }
+      print('[SCREENER] Completed successfully');
+    } catch (e) { 
+      print('[SCREENER] ERROR: $e');
+      setState(() => _status = 'Error: $e'); 
+    }
+    finally { 
+      print('[SCREENER] Finished, running=false');
+      setState(() => _running = false); 
+    }
   }
 
   @override
