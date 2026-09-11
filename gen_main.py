@@ -560,18 +560,15 @@ class _HanPeResultsView extends StatelessWidget {
       Expanded(child: ListView(
         padding: const EdgeInsets.symmetric(horizontal: 12),
         children: [
-          if (bigList.isNotEmpty) ...[
-            const Padding(padding: EdgeInsets.only(bottom: 4), child: Text('超低大换手', style: TextStyle(color: accentBlue, fontSize: 14, fontWeight: FontWeight.bold))),
-            ...bigList.map((s) => _HanPeCard(s)),
-          ],
-          if (smallList.isNotEmpty) ...[
-            const Padding(padding: EdgeInsets.only(top: 12, bottom: 4), child: Text('超低小换手', style: TextStyle(color: accentBlue, fontSize: 14, fontWeight: FontWeight.bold))),
-            ...smallList.map((s) => _HanPeCard(s)),
-          ],
-          if (exitList.isNotEmpty) ...[
-            const Padding(padding: EdgeInsets.only(top: 12, bottom: 4), child: Text('出场参考', style: TextStyle(color: accentOrange, fontSize: 14, fontWeight: FontWeight.bold))),
-            ...exitList.map((s) => _HanPeCard(s)),
-          ],
+          const Padding(padding: EdgeInsets.only(bottom: 4), child: Text('超低大换手', style: TextStyle(color: accentBlue, fontSize: 14, fontWeight: FontWeight.bold))),
+          if (bigList.isNotEmpty) ...bigList.map((s) => _HanPeCard(s))
+          else const Padding(padding: EdgeInsets.only(bottom: 8), child: Text('今日无符合条件的股票', style: TextStyle(color: textMuted, fontSize: 12))),
+          const Padding(padding: EdgeInsets.only(top: 12, bottom: 4), child: Text('超低小换手', style: TextStyle(color: accentBlue, fontSize: 14, fontWeight: FontWeight.bold))),
+          if (smallList.isNotEmpty) ...smallList.map((s) => _HanPeCard(s))
+          else const Padding(padding: EdgeInsets.only(bottom: 8), child: Text('今日无符合条件的股票', style: TextStyle(color: textMuted, fontSize: 12))),
+          const Padding(padding: EdgeInsets.only(top: 12, bottom: 4), child: Text('出场参考', style: TextStyle(color: accentOrange, fontSize: 14, fontWeight: FontWeight.bold))),
+          if (exitList.isNotEmpty) ...exitList.map((s) => _HanPeCard(s))
+          else const Padding(padding: EdgeInsets.only(bottom: 8), child: Text('今日无符合条件的股票', style: TextStyle(color: textMuted, fontSize: 12))),
         ],
       )),
     ]);
