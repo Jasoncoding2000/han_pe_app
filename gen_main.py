@@ -1,6 +1,5 @@
 import os
 code = r"""
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:audioplayers/audioplayers.dart';
@@ -292,78 +291,88 @@ class VShapeEngine {
   }
 }
 
-class TabbedPage extends StatelessWidget {
+class TabbedPage extends StatefulWidget {
   const TabbedPage({super.key});
   @override
-  Widget build(BuildContext context) {
-    return DefaultTabController(
-      length: 2,
-      child: Scaffold(
-        appBar: AppBar(
-          title: const Text('hanPE Screener'), centerTitle: true,
-          bottom: const TabBar(
-            tabs: [Tab(text: 'hanPE'), Tab(text: 'V-Shape')],
-            indicatorColor: accentBlue,
-            labelColor: accentBlue,
-            unselectedLabelColor: textMuted,
-          ),
-        ),
-        body: const TabBarView(children: [HanPePage(), VShapePage()]),
-      ),
-    );
-  }
+  State<TabbedPage> createState() => _TabbedPageState();
 }
 
-class HanPePage extends StatefulWidget {
-  const HanPePage({super.key});
-  @override
-  State<HanPePage> createState() => _HanPePageState();
-}
-
-class _HanPePageState extends State<HanPePage> {
+class _TabbedPageState extends State<TabbedPage> {
   final SinaService _service = SinaService();
   final AudioPlayer _audio = AudioPlayer();
+  
+  // hanPE results
   List<StockData> _bigList = [];
   List<StockData> _smallList = [];
   List<StockData> _exitList = [];
-  String _status = '';
-  bool _running = false;
-
+  String _hanPeStatus = '';
+  bool _hanPeRunning = false;
+  
+  // V-Shape results
+  List<StockData> _vShapeResults = [];
+  String _vShapeStatus = '';
+  bool _vShapeRunning = false;
+  
   @override
-  void initState() { super.initState(); _runScreener(); }
-
-  Future<void> _notify() async {
-    await HapticFeedback.heavyImpact();
-    await Future.delayed(const Duration(milliseconds: 150));
-    await HapticFeedback.heavyImpact();
-    await Future.delayed(const Duration(milliseconds: 150));
-    await HapticFeedback.heavyImpact();
-    await _audio.play(AssetSource('beep.wav'), volume: 1.0);
+  void initState() {
+    super.initState();
+    _runBothScreeners();
   }
-
-  Future<void> _runScreener() async {
-    print('[SCREENER] Starting...');
-    setState(() { _running = true; _status = 'Starting...'; _bigList = []; _smallList = []; _exitList = []; });
+  
+  Future<void> _runBothScreeners() async {
+    print('[APP] Fetching shared sector/stock data...');
+    setState(() {
+      _hanPeRunning = true; _hanPeStatus = 'Fetching industry sectors...';
+      _vShapeRunning = true; _vShapeStatus = 'Fetching industry sectors...';
+    });
+    List<Map<String, String>> sectors;
+    List<StockData> allRows;
     try {
-      print('[SCREENER] Fetching sectors...');
-      setState(() => _status = 'Fetching industry sectors...');
-      final sectors = await _service.fetchSectors();
-      print('[SCREENER] Found ${sectors.length} sectors');
-      setState(() => _status = 'Found ${sectors.length} industries. Fetching stocks...');
-      var allRows = <StockData>[];
+      sectors = await _service.fetchSectors();
+      print('[APP] Found ${sectors.length} sectors. Fetching stocks...');
+      setState(() {
+        _hanPeStatus = 'Found ${sectors.length} industries. Fetching stocks...';
+        _vShapeStatus = 'Found ${sectors.length} industries. Fetching stocks...';
+      });
+      allRows = <StockData>[];
       for (int i = 0; i < sectors.length; i++) {
         final s = sectors[i];
-        print('[SCREENER] Fetching stocks for sector ${i+1}/${sectors.length}: ${s['name']}');
-        setState(() => _status = '[${i+1}/${sectors.length}] ${s['name']}...');
-        try { allRows.addAll(await _service.fetchSectorStocks(s['label']!, s['name']!)); } catch (e) { print('[SCREENER] Error fetching stocks: $e'); }
+        setState(() {
+          _hanPeStatus = '[${i+1}/${sectors.length}] ${s['name']}...';
+          _vShapeStatus = '[${i+1}/${sectors.length}] ${s['name']}...';
+        });
+        try { allRows.addAll(await _service.fetchSectorStocks(s['label']!, s['name']!)); } catch (e) { print('[APP] Error: $e'); }
+      }
+      print('[APP] Fetched ${allRows.length} total stocks. Starting both screeners in parallel...');
+    } catch (e) {
+      print('[APP] Shared data fetch failed: $e');
+      setState(() {
+        _hanPeRunning = false; _hanPeStatus = 'Error: $e';
+        _vShapeRunning = false; _vShapeStatus = 'Error: $e';
+      });
+      return;
+    }
+    await Future.wait([
+      _runHanPeScreener(allRows),
+      _runVShapeScreener(allRows),
+    ]);
+  }
+  
+  Future<void> _runHanPeScreener(List<StockData> allRows) async {
+    print('[SCREENER] Starting hanPE screener...');
+    setState(() { _hanPeRunning = true; _hanPeStatus = 'Starting...'; _bigList = []; _smallList = []; _exitList = []; });
+    try {
+      if (allRows.isEmpty) {
+        setState(() => _hanPeStatus = 'No stock data available');
+        return;
       }
       print('[SCREENER] Total rows: ${allRows.length}');
-      setState(() => _status = 'Processing ${allRows.length} rows...');
+      setState(() => _hanPeStatus = 'Processing ${allRows.length} rows...');
       final cands = ScreenerEngine.run(allRows);
       final enriched = <StockData>[];
       for (int i = 0; i < cands.length; i++) {
         final c = cands[i];
-        setState(() => _status = 'History [${i+1}/${cands.length}] ${c.name}...');
+        setState(() => _hanPeStatus = 'History [${i+1}/${cands.length}] ${c.name}...');
         try {
           final days = await _service.fetchKline(c.code);
           if (days.length < weekDays + 1) continue;
@@ -379,14 +388,14 @@ class _HanPePageState extends State<HanPePage> {
       final big = enriched.where((c) => c.weekYearRatio >= bigRatioMin && c.weekChangePct > 0).toList()
         ..sort((a, b) => b.weekYearRatio.compareTo(a.weekYearRatio));
       final small = enriched.where((c) => c.weekYearRatio <= smallRatioMax).toList()
-        ..sort((a, b) => a.weekYearRatio.compareTo(b.weekYearRatio));
+        ..sort((a, b) => a.weekYearRatio.compareTo(a.weekYearRatio));
       final midCount = enriched.where((c) => c.weekYearRatio > smallRatioMax && c.weekYearRatio < bigRatioMin).length;
       final exitList = List<StockData>.from(enriched)..sort((a, b) => a.hanPe.compareTo(b.hanPe));
       setState(() {
         _bigList = big;
         _smallList = small;
         _exitList = exitList;
-        _status = enriched.isEmpty
+        _hanPeStatus = enriched.isEmpty
             ? 'No stocks passed all filters today.'
             : '大换手 ${big.length}  |  小换手 ${small.length}  |  正常区间 $midCount  |  出场参考 ${exitList.length}';
       });
@@ -394,137 +403,34 @@ class _HanPePageState extends State<HanPePage> {
       print('[SCREENER] Completed successfully');
     } catch (e) { 
       print('[SCREENER] ERROR: $e');
-      setState(() => _status = 'Error: $e'); 
+      setState(() => _hanPeStatus = 'Error: $e'); 
     }
     finally { 
       print('[SCREENER] Finished, running=false');
-      setState(() => _running = false); 
+      setState(() => _hanPeRunning = false); 
     }
   }
-
-  @override
-  void dispose() { _service.dispose(); _audio.dispose(); super.dispose(); }
-
-  @override
-  Widget build(BuildContext context) {
-    final today = DateTime.now();
-    final dateStr = '${today.year}-${today.month.toString().padLeft(2,'0')}-${today.day.toString().padLeft(2,'0')}';
-    return Column(children: [
-      Padding(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.center, children: [
-          Row(children: [
-            Text(dateStr, style: const TextStyle(color: textMuted, fontSize: 12)),
-            const Spacer(),
-            _running ? const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2,color:textMuted)) : GestureDetector(onTap: _runScreener, child: const Icon(Icons.refresh, size: 18, color: textMuted)),
-          ]),
-          const Text('hanPE < 0.3  |  大换手: 周年比≥2+周涨  |  小换手: 周年比≤0.5', style: TextStyle(color: textMuted, fontSize: 11)),
-          const SizedBox(height: 6),
-          Text(_status, style: const TextStyle(fontSize: 12, color: textMuted)),
-        ]),
-      ),
-      if (_bigList.isNotEmpty || _smallList.isNotEmpty || _exitList.isNotEmpty) _buildSections(),
-    ]);
-  }
-
-  Widget _buildSections() {
-    return Expanded(child: ListView(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      children: [
-        _sectionHeader('超低大换手', _bigList.length),
-        ..._bigList.map(_buildCard),
-        const SizedBox(height: 12),
-        _sectionHeader('超低小换手', _smallList.length),
-        ..._smallList.map(_buildCard),
-        const SizedBox(height: 12),
-        _sectionHeader('出场参考 (hanPE合格)', _exitList.length),
-        ..._exitList.map(_buildCard),
-      ],
-    ));
-  }
-
-  Widget _sectionHeader(String title, int count) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 2),
-      child: Row(children: [
-        Text(title, style: const TextStyle(color: accentBlue, fontSize: 14, fontWeight: FontWeight.bold)),
-        const SizedBox(width: 8),
-        Text('$count', style: const TextStyle(color: textMuted, fontSize: 12)),
-      ]),
-    );
-  }
-
-  Widget _buildCard(StockData s) {
-    final chgColor = s.weekChangePct > 0 ? const Color(0xFFEF5350) : (s.weekChangePct < 0 ? const Color(0xFF66BB6A) : textMuted);
-    return Container(margin: const EdgeInsets.only(bottom: 6), padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(color: cardBg, borderRadius: BorderRadius.circular(8), border: Border.all(color: cardBorder)),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          Text(s.code, style: const TextStyle(color: textOffWhite, fontSize: 13, fontWeight: FontWeight.w600)),
-          const SizedBox(width: 8),
-          Expanded(child: Text(s.name, style: const TextStyle(color: textOffWhite, fontSize: 13))),
-          Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-            decoration: BoxDecoration(color: accentBlue.withOpacity(0.15), borderRadius: BorderRadius.circular(4)),
-            child: Text('hanPE ${s.hanPe.toStringAsFixed(3)}', style: const TextStyle(color: accentBlue, fontSize: 12, fontWeight: FontWeight.bold))),
-        ]),
-        const SizedBox(height: 8),
-        Row(children: [_M('价格', s.price.toStringAsFixed(2)), _M('PE', s.pe.toStringAsFixed(1)), _M('行业PE', s.industryMedianPe.toStringAsFixed(1)), _M('周年比', s.weekYearRatio.toStringAsFixed(2)), _M('周涨幅', '${s.weekChangePct >= 0 ? '+' : ''}${s.weekChangePct.toStringAsFixed(1)}%', valueColor: chgColor)],
-        ),
-        const SizedBox(height: 4),
-        Row(children: [const Text('行业', style: TextStyle(color: textMuted, fontSize: 10)), const SizedBox(width: 4), Expanded(child: Text(s.industry, style: const TextStyle(color: textOffWhite, fontSize: 11)))]),
-      ]),
-    );
-  }
-}
-
-class VShapePage extends StatefulWidget {
-  const VShapePage({super.key});
-  @override
-  State<VShapePage> createState() => _VShapePageState();
-}
-
-class _VShapePageState extends State<VShapePage> {
-  final SinaService _service = SinaService();
-  final AudioPlayer _audio = AudioPlayer();
-  List<StockData> _results = [];
-  String _status = '';
-  bool _running = false;
-
-  @override
-  void initState() { super.initState(); _runScreener(); }
-
-  Future<void> _notify() async {
-    await HapticFeedback.heavyImpact();
-    await Future.delayed(const Duration(milliseconds: 150));
-    await HapticFeedback.heavyImpact();
-    await Future.delayed(const Duration(milliseconds: 150));
-    await HapticFeedback.heavyImpact();
-    await _audio.play(AssetSource('beep.wav'), volume: 1.0);
-  }
-
-  Future<void> _runScreener() async {
-    setState(() { _running = true; _status = 'Starting...'; _results = []; });
+  
+  Future<void> _runVShapeScreener(List<StockData> allRows) async {
+    print('[VSHAPE] Starting V-Shape screener...');
+    setState(() { _vShapeRunning = true; _vShapeStatus = 'Starting...'; _vShapeResults = []; });
     try {
-      setState(() => _status = 'Fetching sectors...');
-      final sectors = await _service.fetchSectors();
-      setState(() => _status = 'Found ${sectors.length} industries. Fetching stocks...');
-      var allRows = <StockData>[];
-      for (int i = 0; i < sectors.length; i++) {
-        final s = sectors[i];
-        setState(() => _status = '[${i+1}/${sectors.length}] ${s['name']}...');
-        try { allRows.addAll(await _service.fetchSectorStocks(s['label']!, s['name']!)); } catch (_) {}
+      if (allRows.isEmpty) {
+        setState(() => _vShapeStatus = 'No stock data available');
+        return;
       }
       // Exclude ST/*ST, delisting, B-shares
       final filtered = allRows.where((s) =>
         !RegExp(r'ST|st|\*ST|退', caseSensitive: false).hasMatch(s.name) &&
         !s.code.startsWith('200')
       ).toList();
-      setState(() => _status = 'Scanning ${filtered.length} stocks for V-shapes...');
+      setState(() => _vShapeStatus = 'Scanning ${filtered.length} stocks for V-shapes...');
       print('[VSHAPE] Scanning ${filtered.length} stocks');
       final candidates = <StockData>[];
       int klineErrors = 0;
       for (int i = 0; i < filtered.length; i++) {
         final s = filtered[i];
-        if (i % 100 == 0) setState(() => _status = 'V-Shape [$i/${filtered.length}]...');
+        if (i % 100 == 0) setState(() => _vShapeStatus = 'V-Shape [$i/${filtered.length}]...');
         try {
           final days = await _service.fetchKline(s.code);
           if (days.length < 60) {
@@ -553,19 +459,87 @@ class _VShapePageState extends State<VShapePage> {
       print('[VSHAPE] Scan complete: ${candidates.length} candidates, $klineErrors kline errors');
       candidates.sort((a, b) => b.steepnessRatio.compareTo(a.steepnessRatio));
       setState(() {
-        _results = candidates;
-        _status = candidates.isEmpty
+        _vShapeResults = candidates;
+        _vShapeStatus = candidates.isEmpty
             ? 'No V-shaped stocks found today.'
             : 'Found ${candidates.length} V-shaped recoveries';
       });
       await _notify();
-    } catch (e) { setState(() => _status = 'Error: $e'); }
-    finally { setState(() => _running = false); }
+      print('[VSHAPE] Completed successfully');
+    } catch (e) { 
+      print('[VSHAPE] ERROR: $e');
+      setState(() => _vShapeStatus = 'Error: $e'); 
+    }
+    finally { 
+      print('[VSHAPE] Finished, running=false');
+      setState(() => _vShapeRunning = false); 
+    }
   }
-
+  
+  Future<void> _notify() async {
+    await HapticFeedback.heavyImpact();
+    await Future.delayed(const Duration(milliseconds: 150));
+    await HapticFeedback.heavyImpact();
+    await Future.delayed(const Duration(milliseconds: 150));
+    await HapticFeedback.heavyImpact();
+    await _audio.play(AssetSource('beep.wav'), volume: 1.0);
+  }
+  
   @override
   void dispose() { _service.dispose(); _audio.dispose(); super.dispose(); }
+  
+  @override
+  Widget build(BuildContext context) {
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('hanPE Screener'), centerTitle: true,
+          bottom: const TabBar(
+            tabs: [Tab(text: 'hanPE'), Tab(text: 'V-Shape')],
+            indicatorColor: accentBlue,
+            labelColor: accentBlue,
+            unselectedLabelColor: textMuted,
+          ),
+        ),
+        body: TabBarView(children: [
+          _HanPeResultsView(
+            bigList: _bigList,
+            smallList: _smallList,
+            exitList: _exitList,
+            status: _hanPeStatus,
+            running: _hanPeRunning,
+            onRefresh: _runBothScreeners,
+          ),
+          _VShapeResultsView(
+            results: _vShapeResults,
+            status: _vShapeStatus,
+            running: _vShapeRunning,
+            onRefresh: _runBothScreeners,
+          ),
+        ]),
+      ),
+    );
+  }
+}
 
+class _HanPeResultsView extends StatelessWidget {
+  final List<StockData> bigList;
+  final List<StockData> smallList;
+  final List<StockData> exitList;
+  final String status;
+  final bool running;
+  final VoidCallback onRefresh;
+  
+  const _HanPeResultsView({
+    required this.bigList,
+    required this.smallList,
+    required this.exitList,
+    required this.status,
+    required this.running,
+    required this.onRefresh,
+  });
+  
   @override
   Widget build(BuildContext context) {
     final today = DateTime.now();
@@ -576,19 +550,99 @@ class _VShapePageState extends State<VShapePage> {
           Row(children: [
             Text(dateStr, style: const TextStyle(color: textMuted, fontSize: 12)),
             const Spacer(),
-            _running ? const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2,color:textMuted)) : GestureDetector(onTap: _runScreener, child: const Icon(Icons.refresh, size: 18, color: textMuted)),
+            running ? const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2,color:textMuted)) : GestureDetector(onTap: onRefresh, child: const Icon(Icons.refresh, size: 18, color: textMuted)),
+          ]),
+          const Text('hanPE < 0.3  |  大换手: 周年比≥2+周涨  |  小换手: 周年比≤0.5', style: TextStyle(color: textMuted, fontSize: 11)),
+          const SizedBox(height: 6),
+          Text(status, style: const TextStyle(color: textMuted, fontSize: 12)),
+        ]),
+      ),
+      Expanded(child: ListView(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        children: [
+          if (bigList.isNotEmpty) ...[
+            const Padding(padding: EdgeInsets.only(bottom: 4), child: Text('超低大换手', style: TextStyle(color: accentBlue, fontSize: 14, fontWeight: FontWeight.bold))),
+            ...bigList.map((s) => _HanPeCard(s)),
+          ],
+          if (smallList.isNotEmpty) ...[
+            const Padding(padding: EdgeInsets.only(top: 12, bottom: 4), child: Text('超低小换手', style: TextStyle(color: accentBlue, fontSize: 14, fontWeight: FontWeight.bold))),
+            ...smallList.map((s) => _HanPeCard(s)),
+          ],
+          if (exitList.isNotEmpty) ...[
+            const Padding(padding: EdgeInsets.only(top: 12, bottom: 4), child: Text('出场参考', style: TextStyle(color: accentOrange, fontSize: 14, fontWeight: FontWeight.bold))),
+            ...exitList.map((s) => _HanPeCard(s)),
+          ],
+        ],
+      )),
+    ]);
+  }
+}
+
+class _VShapeResultsView extends StatelessWidget {
+  final List<StockData> results;
+  final String status;
+  final bool running;
+  final VoidCallback onRefresh;
+  
+  const _VShapeResultsView({
+    required this.results,
+    required this.status,
+    required this.running,
+    required this.onRefresh,
+  });
+  
+  @override
+  Widget build(BuildContext context) {
+    final today = DateTime.now();
+    final dateStr = '${today.year}-${today.month.toString().padLeft(2,'0')}-${today.day.toString().padLeft(2,'0')}';
+    return Column(children: [
+      Padding(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.center, children: [
+          Row(children: [
+            Text(dateStr, style: const TextStyle(color: textMuted, fontSize: 12)),
+            const Spacer(),
+            running ? const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2,color:textMuted)) : GestureDetector(onTap: onRefresh, child: const Icon(Icons.refresh, size: 18, color: textMuted)),
           ]),
           const Text('Drop>=20%  Recovery>=30%  Ascent>Descent  R2>=0.5  Bottom<=90d', style: TextStyle(color: textMuted, fontSize: 10)),
           const SizedBox(height: 6),
-          Text(_status, style: const TextStyle(fontSize: 12, color: textMuted)),
+          Text(status, style: const TextStyle(color: textMuted, fontSize: 12)),
         ]),
       ),
-      if (_results.isNotEmpty) Expanded(child: ListView.builder(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        itemCount: _results.length,
-        itemBuilder: (context, i) => _VCard(_results[i]),
+      Expanded(child: ListView(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        children: results.map((s) => _VCard(s)).toList(),
       )),
     ]);
+  }
+}
+
+
+
+
+
+class _HanPeCard extends StatelessWidget {
+  final StockData s;
+  const _HanPeCard(this.s);
+  @override
+  Widget build(BuildContext context) {
+    final chgColor = s.weekChangePct > 0 ? const Color(0xFFEF5350) : (s.weekChangePct < 0 ? const Color(0xFF66BB6A) : textMuted);
+    return Container(margin: const EdgeInsets.only(bottom: 6), padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(color: cardBg, borderRadius: BorderRadius.circular(8), border: Border.all(color: cardBorder)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Text(s.code, style: const TextStyle(color: textOffWhite, fontSize: 13, fontWeight: FontWeight.w600)),
+          const SizedBox(width: 8),
+          Expanded(child: Text(s.name, style: const TextStyle(color: textOffWhite, fontSize: 13))),
+          Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(color: accentBlue.withOpacity(0.15), borderRadius: BorderRadius.circular(4)),
+            child: Text('hanPE ${s.hanPe.toStringAsFixed(3)}', style: const TextStyle(color: accentBlue, fontSize: 12, fontWeight: FontWeight.bold))),
+        ]),
+        const SizedBox(height: 8),
+        Row(children: [_M('价格', s.price.toStringAsFixed(2)), _M('PE', s.pe.toStringAsFixed(1)), _M('行业PE', s.industryMedianPe.toStringAsFixed(1)), _M('周年比', s.weekYearRatio.toStringAsFixed(2)), _M('周涨幅', '${s.weekChangePct >= 0 ? '+' : ''}${s.weekChangePct.toStringAsFixed(1)}%', valueColor: chgColor)]),
+        const SizedBox(height: 4),
+        Row(children: [const Text('行业', style: TextStyle(color: textMuted, fontSize: 10)), const SizedBox(width: 4), Expanded(child: Text(s.industry, style: const TextStyle(color: textOffWhite, fontSize: 11)))]),
+      ]),
+    );
   }
 }
 
@@ -641,7 +695,6 @@ class _M extends StatelessWidget {
     ]));
   }
 }
-
 """
 path = os.path.join(os.path.dirname(__file__), 'lib', 'main.dart')
 with open(path, 'w', encoding='utf-8') as f:
