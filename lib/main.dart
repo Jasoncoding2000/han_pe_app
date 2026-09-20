@@ -20,6 +20,9 @@ const int vsMaxRecoveryPct = 100;
 const int vsMinLegDays = 15;
 const double vsMinR2 = 0.50;
 const int vsMaxBottomAge = 90;
+// Combined strategy: trend comparison parameters
+const int recentDays = 30;   // window for "current" trend slope
+const int priorDays = 60;    // window for "previous" trend slope
 const Color accentOrange = Color(0xFFFF9800);
 
 const Color bgBlack = Color(0xFF1A1A2E);  // Dark blue-grey (brightened for visibility)
@@ -60,6 +63,9 @@ class StockData {
   double peakVal = 0, bottomVal = 0, recoveryPct = 0;
   double descentR2 = 0, ascentR2 = 0, steepnessRatio = 0;
   int peakIdx = 0, bottomIdx = 0, bottomAge = 0;
+  // Combined strategy fields
+  double recentSlope = 0, priorSlope = 0, slopeDiff = 0;
+  double recentChgPct = 0, priorChgPct = 0;
   StockData({required this.code, required this.name, required this.price, required this.pe, required this.turnover, required this.industry, this.industryMedianPe = 0, this.hanPe = 0});
 }
 
@@ -289,6 +295,51 @@ class VShapeEngine {
   }
 }
 
+/// Combined strategy: checks if recent rising trend is steeper than prior falling/flat trend.
+/// Much simpler than V-shape — just compares two linear regression slopes.
+class TrendEngine {
+  /// Compute slope as % per day via linear regression.
+  static double _slope(List<double> closes) {
+    final n = closes.length;
+    if (n < 5) return 0.0;
+    double meanX = (n - 1) / 2.0;
+    double meanY = closes.reduce((a, b) => a + b) / n;
+    double cov = 0, varX = 0;
+    for (int i = 0; i < n; i++) {
+      double dx = i - meanX;
+      cov += dx * (closes[i] - meanY);
+      varX += dx * dx;
+    }
+    if (varX < 1e-12) return 0.0;
+    return (cov / varX) / meanY * 100;  // % per day
+  }
+
+  /// Returns slope comparison result or null if insufficient data / no improvement.
+  static Map<String, dynamic>? compare(List<KlineDay> days) {
+    final needed = recentDays + priorDays;
+    if (days.length < needed) return null;
+    final closes = <double>[];
+    for (final d in days) {
+      if (d.close > 0 && d.close.isFinite) closes.add(d.close);
+    }
+    if (closes.length < needed) return null;
+    final recentCloses = closes.sublist(closes.length - recentDays);
+    final priorCloses = closes.sublist(closes.length - needed, closes.length - recentDays);
+    final recentSl = _slope(recentCloses);
+    final priorSl = _slope(priorCloses);
+    if (recentSl <= priorSl) return null;  // no improvement
+    final recentChg = (recentCloses.last / recentCloses.first - 1) * 100;
+    final priorChg = (priorCloses.last / priorCloses.first - 1) * 100;
+    return {
+      'recentSlope': recentSl,
+      'priorSlope': priorSl,
+      'slopeDiff': recentSl - priorSl,
+      'recentChgPct': recentChg,
+      'priorChgPct': priorChg,
+    };
+  }
+}
+
 class TabbedPage extends StatefulWidget {
   const TabbedPage({super.key});
   @override
@@ -306,6 +357,11 @@ class _TabbedPageState extends State<TabbedPage> {
   String _hanPeStatus = '';
   bool _hanPeRunning = false;
   
+  // Combined strategy results
+  List<StockData> _combinedResults = [];
+  String _combinedStatus = '';
+  bool _combinedRunning = false;
+  
   // V-Shape results
   List<StockData> _vShapeResults = [];
   String _vShapeStatus = '';
@@ -321,6 +377,7 @@ class _TabbedPageState extends State<TabbedPage> {
     print('[APP] Fetching shared sector/stock data...');
     setState(() {
       _hanPeRunning = true; _hanPeStatus = 'Fetching industry sectors...';
+      _combinedRunning = true; _combinedStatus = 'Waiting for hanPE...';
       _vShapeRunning = true; _vShapeStatus = 'Fetching industry sectors...';
     });
     List<Map<String, String>> sectors;
@@ -337,6 +394,7 @@ class _TabbedPageState extends State<TabbedPage> {
         final s = sectors[i];
         setState(() {
           _hanPeStatus = '[${i+1}/${sectors.length}] ${s['name']}...';
+          _combinedStatus = '[${i+1}/${sectors.length}] ${s['name']}...';
           _vShapeStatus = '[${i+1}/${sectors.length}] ${s['name']}...';
         });
         try { allRows.addAll(await _service.fetchSectorStocks(s['label']!, s['name']!)); } catch (e) { print('[APP] Error: $e'); }
@@ -346,23 +404,28 @@ class _TabbedPageState extends State<TabbedPage> {
       print('[APP] Shared data fetch failed: $e');
       setState(() {
         _hanPeRunning = false; _hanPeStatus = 'Error: $e';
+        _combinedRunning = false; _combinedStatus = 'Error: $e';
         _vShapeRunning = false; _vShapeStatus = 'Error: $e';
       });
       return;
     }
-    // Run sequentially: hanPE first (fast), then V-Shape (slow ~3000 klines)
-    // Both share the same http.Client, so concurrent kline requests overwhelm it
-    await _runHanPeScreener(allRows);
+    // Execution order optimized for UX:
+    // 1. hanPE (fast, ~30s) → shows results immediately
+    // 2. Combined (instant, reuses hanPE k-lines) → shows results immediately after hanPE
+    // 3. V-Shape (slow, ~3min, scans all stocks) → runs last in background
+    final klineCache = await _runHanPeScreener(allRows);
+    _runCombinedScreener(klineCache);
     await _runVShapeScreener(allRows);
   }
   
-  Future<void> _runHanPeScreener(List<StockData> allRows) async {
+  Future<Map<String, List<KlineDay>>> _runHanPeScreener(List<StockData> allRows) async {
     print('[SCREENER] Starting hanPE screener...');
     setState(() { _hanPeRunning = true; _hanPeStatus = 'Starting...'; _bigList = []; _smallList = []; _exitList = []; });
+    final klineCache = <String, List<KlineDay>>{};
     try {
       if (allRows.isEmpty) {
         setState(() => _hanPeStatus = 'No stock data available');
-        return;
+        return klineCache;
       }
       print('[SCREENER] Total rows: ${allRows.length}');
       setState(() => _hanPeStatus = 'Processing ${allRows.length} rows...');
@@ -373,6 +436,7 @@ class _TabbedPageState extends State<TabbedPage> {
         setState(() => _hanPeStatus = 'History [${i+1}/${cands.length}] ${c.name}...');
         try {
           final days = await _service.fetchKline(c.code);
+          klineCache[c.code] = days;  // Cache k-line for combined strategy
           if (days.length < weekDays + 1) continue;
           final weekVol = days.sublist(days.length - weekDays).map((d) => d.volume).reduce((a, b) => a + b) / weekDays;
           final yearVol = days.map((d) => d.volume).reduce((a, b) => a + b) / days.length;
@@ -406,6 +470,45 @@ class _TabbedPageState extends State<TabbedPage> {
     finally { 
       print('[SCREENER] Finished, running=false');
       setState(() => _hanPeRunning = false); 
+    }
+    return klineCache;
+  }
+  
+  /// Combined strategy: hanPE candidates + trend improvement check.
+  /// Reuses k-lines already fetched by hanPE screener (no extra network calls).
+  void _runCombinedScreener(Map<String, List<KlineDay>> klineCache) {
+    print('[COMBINED] Starting combined strategy on ${klineCache.length} cached k-lines...');
+    setState(() { _combinedRunning = true; _combinedStatus = 'Analyzing trends...'; _combinedResults = []; });
+    try {
+      // Get the hanPE candidates from exitList (all enriched hanPE candidates)
+      final results = <StockData>[];
+      for (final s in _exitList) {
+        final days = klineCache[s.code];
+        if (days == null || days.isEmpty) continue;
+        final result = TrendEngine.compare(days);
+        if (result != null) {
+          s.recentSlope = result['recentSlope'];
+          s.priorSlope = result['priorSlope'];
+          s.slopeDiff = result['slopeDiff'];
+          s.recentChgPct = result['recentChgPct'];
+          s.priorChgPct = result['priorChgPct'];
+          results.add(s);
+        }
+      }
+      results.sort((a, b) => b.slopeDiff.compareTo(a.slopeDiff));
+      final rising = results.where((s) => s.recentSlope > 0).length;
+      setState(() {
+        _combinedResults = results;
+        _combinedStatus = results.isEmpty
+            ? 'No stocks with improving trend.'
+            : '${results.length} stocks (↑$rising rising, ↓${results.length - rising} improving)';
+      });
+      print('[COMBINED] Found ${results.length} stocks with improving trend');
+    } catch (e) {
+      print('[COMBINED] ERROR: $e');
+      setState(() => _combinedStatus = 'Error: $e');
+    } finally {
+      setState(() => _combinedRunning = false);
     }
   }
   
@@ -489,12 +592,12 @@ class _TabbedPageState extends State<TabbedPage> {
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 2,
+      length: 3,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('hanPE Screener'), centerTitle: true,
           bottom: const TabBar(
-            tabs: [Tab(text: 'hanPE'), Tab(text: 'V-Shape')],
+            tabs: [Tab(text: 'hanPE'), Tab(text: '综合'), Tab(text: 'V-Shape')],
             indicatorColor: accentBlue,
             labelColor: accentBlue,
             unselectedLabelColor: textMuted,
@@ -507,6 +610,12 @@ class _TabbedPageState extends State<TabbedPage> {
             exitList: _exitList,
             status: _hanPeStatus,
             running: _hanPeRunning,
+            onRefresh: _runBothScreeners,
+          ),
+          _CombinedResultsView(
+            results: _combinedResults,
+            status: _combinedStatus,
+            running: _combinedRunning,
             onRefresh: _runBothScreeners,
           ),
           _VShapeResultsView(
@@ -573,6 +682,44 @@ class _HanPeResultsView extends StatelessWidget {
   }
 }
 
+class _CombinedResultsView extends StatelessWidget {
+  final List<StockData> results;
+  final String status;
+  final bool running;
+  final VoidCallback onRefresh;
+  
+  const _CombinedResultsView({
+    required this.results,
+    required this.status,
+    required this.running,
+    required this.onRefresh,
+  });
+  
+  @override
+  Widget build(BuildContext context) {
+    final today = DateTime.now();
+    final dateStr = '${today.year}-${today.month.toString().padLeft(2,'0')}-${today.day.toString().padLeft(2,'0')}';
+    return Column(children: [
+      Padding(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.center, children: [
+          Row(children: [
+            Text(dateStr, style: const TextStyle(color: textMuted, fontSize: 12)),
+            const Spacer(),
+            running ? const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2,color:textMuted)) : GestureDetector(onTap: onRefresh, child: const Icon(Icons.refresh, size: 18, color: textMuted)),
+          ]),
+          const Text('hanPE < 0.3  +  近30日斜率 > 前60日斜率', style: TextStyle(color: textMuted, fontSize: 11)),
+          const SizedBox(height: 6),
+          Text(status, style: const TextStyle(color: textMuted, fontSize: 12)),
+        ]),
+      ),
+      Expanded(child: ListView(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        children: results.map((s) => _CombinedCard(s)).toList(),
+      )),
+    ]);
+  }
+}
+
 class _VShapeResultsView extends StatelessWidget {
   final List<StockData> results;
   final String status;
@@ -634,6 +781,46 @@ class _HanPeCard extends StatelessWidget {
         ]),
         const SizedBox(height: 8),
         Row(children: [_M('价格', s.price.toStringAsFixed(2)), _M('PE', s.pe.toStringAsFixed(1)), _M('行业PE', s.industryMedianPe.toStringAsFixed(1)), _M('周年比', s.weekYearRatio.toStringAsFixed(2)), _M('周涨幅', '${s.weekChangePct >= 0 ? '+' : ''}${s.weekChangePct.toStringAsFixed(1)}%', valueColor: chgColor)]),
+        const SizedBox(height: 4),
+        Row(children: [const Text('行业', style: TextStyle(color: textMuted, fontSize: 10)), const SizedBox(width: 4), Expanded(child: Text(s.industry, style: const TextStyle(color: textOffWhite, fontSize: 11)))]),
+      ]),
+    );
+  }
+}
+
+class _CombinedCard extends StatelessWidget {
+  final StockData s;
+  const _CombinedCard(this.s);
+  @override
+  Widget build(BuildContext context) {
+    final isRising = s.recentSlope > 0;
+    final trendIcon = isRising ? '↑' : '↓';
+    final trendColor = isRising ? const Color(0xFFEF5350) : const Color(0xFFFF9800);
+    final priorColor = s.priorChgPct > 0 ? const Color(0xFFEF5350) : (s.priorChgPct < 0 ? const Color(0xFF66BB6A) : textMuted);
+    final recentColor = s.recentChgPct > 0 ? const Color(0xFFEF5350) : (s.recentChgPct < 0 ? const Color(0xFF66BB6A) : textMuted);
+    return Container(margin: const EdgeInsets.only(bottom: 6), padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(color: cardBg, borderRadius: BorderRadius.circular(8), border: Border.all(color: cardBorder)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Text(s.code, style: const TextStyle(color: textOffWhite, fontSize: 13, fontWeight: FontWeight.w600)),
+          const SizedBox(width: 8),
+          Expanded(child: Text(s.name, style: const TextStyle(color: textOffWhite, fontSize: 13))),
+          Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(color: trendColor.withOpacity(0.15), borderRadius: BorderRadius.circular(4)),
+            child: Text('$trendIcon ${s.slopeDiff.toStringAsFixed(3)}', style: TextStyle(color: trendColor, fontSize: 12, fontWeight: FontWeight.bold))),
+        ]),
+        const SizedBox(height: 8),
+        Row(children: [
+          _M('hanPE', s.hanPe.toStringAsFixed(3)),
+          _M('PE', s.pe.toStringAsFixed(1)),
+          _M('行业PE', s.industryMedianPe.toStringAsFixed(1)),
+        ]),
+        const SizedBox(height: 4),
+        Row(children: [
+          _M('前60日', '${s.priorChgPct >= 0 ? "+" : ""}${s.priorChgPct.toStringAsFixed(1)}%', valueColor: priorColor),
+          _M('近30日', '${s.recentChgPct >= 0 ? "+" : ""}${s.recentChgPct.toStringAsFixed(1)}%', valueColor: recentColor),
+          _M('斜率差', s.slopeDiff.toStringAsFixed(3)),
+        ]),
         const SizedBox(height: 4),
         Row(children: [const Text('行业', style: TextStyle(color: textMuted, fontSize: 10)), const SizedBox(width: 4), Expanded(child: Text(s.industry, style: const TextStyle(color: textOffWhite, fontSize: 11)))]),
       ]),
