@@ -597,7 +597,7 @@ class _TabbedPageState extends State<TabbedPage> {
         appBar: AppBar(
           title: const Text('hanPE Screener'), centerTitle: true,
           bottom: const TabBar(
-            tabs: [Tab(text: 'hanPE'), Tab(text: '综合'), Tab(text: 'V-Shape')],
+            tabs: [Tab(text: 'hanPE'), Tab(text: '上折'), Tab(text: 'V-Shape')],
             indicatorColor: accentBlue,
             labelColor: accentBlue,
             unselectedLabelColor: textMuted,
