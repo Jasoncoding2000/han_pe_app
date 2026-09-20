@@ -327,7 +327,8 @@ class TrendEngine {
     final priorCloses = closes.sublist(closes.length - needed, closes.length - recentDays);
     final recentSl = _slope(recentCloses);
     final priorSl = _slope(priorCloses);
-    if (recentSl <= priorSl) return null;  // no improvement
+    if (recentSl <= 0) return null;  // must be actually rising
+    if (recentSl <= priorSl) return null;  // must be steeper than prior
     final recentChg = (recentCloses.last / recentCloses.first - 1) * 100;
     final priorChg = (priorCloses.last / priorCloses.first - 1) * 100;
     return {
@@ -496,12 +497,11 @@ class _TabbedPageState extends State<TabbedPage> {
         }
       }
       results.sort((a, b) => b.slopeDiff.compareTo(a.slopeDiff));
-      final rising = results.where((s) => s.recentSlope > 0).length;
       setState(() {
         _combinedResults = results;
         _combinedStatus = results.isEmpty
-            ? 'No stocks with improving trend.'
-            : '${results.length} stocks (↑$rising rising, ↓${results.length - rising} improving)';
+            ? 'No stocks with upward trend.'
+            : '${results.length} cheap stocks rising';
       });
       print('[COMBINED] Found ${results.length} stocks with improving trend');
     } catch (e) {
@@ -707,7 +707,7 @@ class _CombinedResultsView extends StatelessWidget {
             const Spacer(),
             running ? const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2,color:textMuted)) : GestureDetector(onTap: onRefresh, child: const Icon(Icons.refresh, size: 18, color: textMuted)),
           ]),
-          const Text('hanPE < 0.3  +  近30日斜率 > 前60日斜率', style: TextStyle(color: textMuted, fontSize: 11)),
+          const Text('hanPE < 0.3  +  近30日上升 且斜率 > 前60日', style: TextStyle(color: textMuted, fontSize: 11)),
           const SizedBox(height: 6),
           Text(status, style: const TextStyle(color: textMuted, fontSize: 12)),
         ]),
