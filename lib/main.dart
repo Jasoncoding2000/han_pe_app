@@ -639,13 +639,13 @@ class _TabbedPageState extends State<TabbedPage> {
           _HanPeResultsView(
             bigList: _bigList,
             smallList: _smallList,
-            exitList: _exitList,
             status: _hanPeStatus,
             running: _hanPeRunning,
             onRefresh: _runBothScreeners,
           ),
           _CombinedResultsView(
             results: _combinedResults,
+            exitList: _exitList,
             status: _combinedStatus,
             running: _combinedRunning,
             onRefresh: _runBothScreeners,
@@ -665,7 +665,6 @@ class _TabbedPageState extends State<TabbedPage> {
 class _HanPeResultsView extends StatelessWidget {
   final List<StockData> bigList;
   final List<StockData> smallList;
-  final List<StockData> exitList;
   final String status;
   final bool running;
   final VoidCallback onRefresh;
@@ -673,6 +672,52 @@ class _HanPeResultsView extends StatelessWidget {
   const _HanPeResultsView({
     required this.bigList,
     required this.smallList,
+    required this.status,
+    required this.running,
+    required this.onRefresh,
+  });
+  
+  @override
+  Widget build(BuildContext context) {
+    final today = DateTime.now();
+    final dateStr = '${today.year}-${today.month.toString().padLeft(2,'0')}-${today.day.toString().padLeft(2,'0')}';
+    return Column(children: [
+      Padding(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.center, children: [
+          Row(children: [
+            Text(dateStr, style: const TextStyle(color: textMuted, fontSize: 12)),
+            const Spacer(),
+            running ? const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2,color:textMuted)) : GestureDetector(onTap: onRefresh, child: const Icon(Icons.refresh, size: 18, color: textMuted)),
+          ]),
+          const Text('worst = max(hanPE, hanPB)  |  Rank 1-8 = rotation band  |  \u5927\u6362\u624b\u22652+\u5468\u6da8  |  \u5c0f\u6362\u624b\u22640.5', style: TextStyle(color: textMuted, fontSize: 10)),
+          const SizedBox(height: 6),
+          Text(status, style: const TextStyle(color: textMuted, fontSize: 12)),
+        ]),
+      ),
+      Expanded(child: ListView(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        children: [
+          const Padding(padding: EdgeInsets.only(bottom: 4), child: Text('高换手 (top-50)', style: TextStyle(color: accentBlue, fontSize: 14, fontWeight: FontWeight.bold))),
+          if (bigList.isNotEmpty) ...bigList.map((s) => _HanPeCard(s))
+          else const Padding(padding: EdgeInsets.only(bottom: 8), child: Text('今日无符合条件的股票', style: TextStyle(color: textMuted, fontSize: 12))),
+          const Padding(padding: EdgeInsets.only(top: 12, bottom: 4), child: Text('低换手 (top-50)', style: TextStyle(color: accentBlue, fontSize: 14, fontWeight: FontWeight.bold))),
+          if (smallList.isNotEmpty) ...smallList.map((s) => _HanPeCard(s))
+          else const Padding(padding: EdgeInsets.only(bottom: 8), child: Text('今日无符合条件的股票', style: TextStyle(color: textMuted, fontSize: 12))),
+        ],
+      )),
+    ]);
+  }
+}
+
+class _CombinedResultsView extends StatelessWidget {
+  final List<StockData> results;
+  final List<StockData> exitList;
+  final String status;
+  final bool running;
+  final VoidCallback onRefresh;
+  
+  const _CombinedResultsView({
+    required this.results,
     required this.exitList,
     required this.status,
     required this.running,
@@ -691,7 +736,7 @@ class _HanPeResultsView extends StatelessWidget {
             const Spacer(),
             running ? const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2,color:textMuted)) : GestureDetector(onTap: onRefresh, child: const Icon(Icons.refresh, size: 18, color: textMuted)),
           ]),
-          const Text('worst = max(hanPE, hanPB) < 0.3  |  Rank 1-8 = rotation band  |  \u5927\u6362\u624b\u22652+\u5468\u6da8  |  \u5c0f\u6362\u624b\u22640.5', style: TextStyle(color: textMuted, fontSize: 10)),
+          const Text('worst < 0.3 + upbend (30d slope > 0 > prior 60d)', style: TextStyle(color: textMuted, fontSize: 11)),
           const SizedBox(height: 6),
           Text(status, style: const TextStyle(color: textMuted, fontSize: 12)),
         ]),
@@ -699,56 +744,21 @@ class _HanPeResultsView extends StatelessWidget {
       Expanded(child: ListView(
         padding: const EdgeInsets.symmetric(horizontal: 12),
         children: [
-          const Padding(padding: EdgeInsets.only(bottom: 4), child: Text('高换手 (top-50)', style: TextStyle(color: accentBlue, fontSize: 14, fontWeight: FontWeight.bold))),
-          if (bigList.isNotEmpty) ...bigList.map((s) => _HanPeCard(s))
-          else const Padding(padding: EdgeInsets.only(bottom: 8), child: Text('今日无符合条件的股票', style: TextStyle(color: textMuted, fontSize: 12))),
-          const Padding(padding: EdgeInsets.only(top: 12, bottom: 4), child: Text('低换手 (top-50)', style: TextStyle(color: accentBlue, fontSize: 14, fontWeight: FontWeight.bold))),
-          if (smallList.isNotEmpty) ...smallList.map((s) => _HanPeCard(s))
-          else const Padding(padding: EdgeInsets.only(bottom: 8), child: Text('今日无符合条件的股票', style: TextStyle(color: textMuted, fontSize: 12))),
-          const Padding(padding: EdgeInsets.only(top: 12, bottom: 4), child: Text('worst < 0.3 (buy band)', style: TextStyle(color: accentOrange, fontSize: 14, fontWeight: FontWeight.bold))),
-          if (exitList.isNotEmpty) ...exitList.map((s) => _HanPeCard(s))
-          else const Padding(padding: EdgeInsets.only(bottom: 8), child: Text('今日无符合条件的股票', style: TextStyle(color: textMuted, fontSize: 12))),
+          const Padding(padding: EdgeInsets.only(bottom: 4), child: Text('BUY (upbend pass)', style: TextStyle(color: Color(0xFF00E676), fontSize: 14, fontWeight: FontWeight.bold))),
+          if (results.isNotEmpty) ...results.map((s) => _CombinedCard(s))
+          else const Padding(padding: EdgeInsets.only(bottom: 8), child: Text('\u65e0\u80a1\u7968\u901a\u8fc7\u8d8b\u52bf\u95e8\u69db', style: TextStyle(color: textMuted, fontSize: 12))),
+          const Padding(padding: EdgeInsets.only(top: 12, bottom: 4), child: Text('WATCH (cheap, not rising)', style: TextStyle(color: accentOrange, fontSize: 14, fontWeight: FontWeight.bold))),
+          ..._watchList().map((s) => _HanPeCard(s)),
+          if (_watchList().isEmpty) const Padding(padding: EdgeInsets.only(bottom: 8), child: Text('\u65e0\u5f85\u89c2\u5bdf\u80a1\u7968', style: TextStyle(color: textMuted, fontSize: 12))),
         ],
       )),
     ]);
   }
-}
 
-class _CombinedResultsView extends StatelessWidget {
-  final List<StockData> results;
-  final String status;
-  final bool running;
-  final VoidCallback onRefresh;
-  
-  const _CombinedResultsView({
-    required this.results,
-    required this.status,
-    required this.running,
-    required this.onRefresh,
-  });
-  
-  @override
-  Widget build(BuildContext context) {
-    final today = DateTime.now();
-    final dateStr = '${today.year}-${today.month.toString().padLeft(2,'0')}-${today.day.toString().padLeft(2,'0')}';
-    return Column(children: [
-      Padding(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.center, children: [
-          Row(children: [
-            Text(dateStr, style: const TextStyle(color: textMuted, fontSize: 12)),
-            const Spacer(),
-            running ? const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2,color:textMuted)) : GestureDetector(onTap: onRefresh, child: const Icon(Icons.refresh, size: 18, color: textMuted)),
-          ]),
-          const Text('worst < 0.3  +  近30日上升 且斜率 > 前60日  (sorted by rank)', style: TextStyle(color: textMuted, fontSize: 11)),
-          const SizedBox(height: 6),
-          Text(status, style: const TextStyle(color: textMuted, fontSize: 12)),
-        ]),
-      ),
-      Expanded(child: ListView(
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        children: results.map((s) => _CombinedCard(s)).toList(),
-      )),
-    ]);
+  List<StockData> _watchList() {
+    final passed = results.map((s) => s.code).toSet();
+    return exitList.where((s) => !passed.contains(s.code)).toList()
+      ..sort((a, b) => a.rankWorst.compareTo(b.rankWorst));
   }
 }
 
