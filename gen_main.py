@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 import 'package:gbk_codec/gbk_codec.dart';
 
 const double hanpeThreshold = 0.3;
+const int rotationBand = 8;  // rank_exit: hold top-8 cheapest by worst(hanPE,hanPB)
 const double bigRatioMin = 2.0;  // 大换手: 周均量 ≥ 2× 年均量
 const double smallRatioMax = 0.5; // 小换手: 周均量 ≤ ½ 年均量
 const int weekDays = 5; // trading days per week
@@ -59,8 +60,9 @@ class HanPeApp extends StatelessWidget {
 
 class StockData {
   final String code, name, industry;
-  final double price, pe, turnover;
-  double industryMedianPe, hanPe;
+  final double price, pe, pb, turnover;
+  double industryMedianPe, industryMedianPb, hanPe, hanPb, worst;
+  int rankWorst = 0;
   double weekYearRatio = 0, weekChangePct = 0;
   double peakVal = 0, bottomVal = 0, recoveryPct = 0;
   double descentR2 = 0, ascentR2 = 0, steepnessRatio = 0;
@@ -68,7 +70,7 @@ class StockData {
   // Combined strategy fields
   double recentSlope = 0, priorSlope = 0, slopeDiff = 0;
   double recentChgPct = 0, priorChgPct = 0;
-  StockData({required this.code, required this.name, required this.price, required this.pe, required this.turnover, required this.industry, this.industryMedianPe = 0, this.hanPe = 0});
+  StockData({required this.code, required this.name, required this.price, required this.pe, required this.pb, required this.turnover, required this.industry, this.industryMedianPe = 0, this.industryMedianPb = 0, this.hanPe = 0, this.hanPb = 0, this.worst = 0});
 }
 
 class KlineDay {
@@ -136,10 +138,11 @@ class SinaService {
         final code = symbol.padLeft(6, '0');
         final price = _sd(item['trade']);
         final pe = _sd(item['per']);
+        final pb = _sd(item['pbs']) ?? _sd(item['pb']);  // Sina uses 'pbs' for 市净率
         final turnover = _sd(item['turnoverratio']);
         final name = item['name'] as String? ?? '';
         if (price != null && pe != null && turnover != null) {
-          stocks.add(StockData(code: code, name: name, price: price, pe: pe, turnover: turnover, industry: industryName));
+          stocks.add(StockData(code: code, name: name, price: price, pe: pe, pb: pb ?? 0, turnover: turnover, industry: industryName));
         }
       }
       if (data.length < num) break;
@@ -172,31 +175,53 @@ class SinaService {
 }
 
 class ScreenerEngine {
+  /// Composite screen: worst = max(hanPE, hanPB), rank all valid stocks ascending.
+  /// Returns the full ranked list (rank 1 = cheapest on the composite).
   static List<StockData> run(List<StockData> allRows) {
+    // 1. Filter universe
     var df = allRows.where((r) {
       if (!RegExp(r'^(60|00[0-3])').hasMatch(r.code)) return false;
       if (RegExp(r'ST|st|\*ST|退', caseSensitive: false).hasMatch(r.name)) return false;
       if (r.price <= 0 || r.industry.isEmpty) return false;
       return true;
     }).toList();
-    final indGroups = <String, List<double>>{};
-    for (final r in df) indGroups.putIfAbsent(r.industry, () => []).add(r.pe);
-    final indMedian = <String, double>{};
-    indGroups.forEach((ind, pes) { indMedian[ind] = _med(pes); });
-    var cands = <StockData>[];
+    // 2. Compute industry median PE and PB
+    final peGroups = <String, List<double>>{};
+    final pbGroups = <String, List<double>>{};
     for (final r in df) {
-      if (r.pe <= 0) continue;
-      final med = indMedian[r.industry];
-      if (med == null) continue;
-      r.industryMedianPe = med;
-      r.hanPe = r.pe / med;
-      if (r.hanPe > 0 && r.hanPe < hanpeThreshold) cands.add(r);
+      if (r.pe > 0) peGroups.putIfAbsent(r.industry, () => []).add(r.pe);
+      if (r.pb > 0) pbGroups.putIfAbsent(r.industry, () => []).add(r.pb);
     }
+    final medPe = <String, double>{};
+    final medPb = <String, double>{};
+    peGroups.forEach((ind, v) { medPe[ind] = _med(v); });
+    pbGroups.forEach((ind, v) { medPb[ind] = _med(v); });
+    // 3. Compute worst = max(hanPE, hanPB) for stocks where both are valid
+    var valid = <StockData>[];
+    for (final r in df) {
+      if (r.pe <= 0 || r.pb <= 0) continue;
+      final mp = medPe[r.industry];
+      final mb = medPb[r.industry];
+      if (mp == null || mb == null || mp <= 0 || mb <= 0) continue;
+      r.industryMedianPe = mp;
+      r.industryMedianPb = mb;
+      r.hanPe = r.pe / mp;
+      r.hanPb = r.pb / mb;
+      r.worst = r.hanPe > r.hanPb ? r.hanPe : r.hanPb;  // max(hanPE, hanPB)
+      if (r.worst > 0 && r.worst.isFinite) valid.add(r);
+    }
+    // 4. Rank all valid stocks by worst ascending (rank 1 = cheapest)
+    valid.sort((a, b) => a.worst.compareTo(b.worst));
+    for (int i = 0; i < valid.length; i++) {
+      valid[i].rankWorst = i + 1;
+    }
+    // Deduplicate by code (keep cheapest occurrence)
     final best = <String, StockData>{};
-    for (final c in cands) { final e = best[c.code]; if (e == null || c.hanPe < e.hanPe) best[c.code] = c; }
-    cands = best.values.toList();
-    cands.sort((a, b) => a.hanPe.compareTo(b.hanPe));
-    return cands;
+    for (final c in valid) { final e = best[c.code]; if (e == null || c.worst < e.worst) best[c.code] = c; }
+    var result = best.values.toList();
+    result.sort((a, b) => a.worst.compareTo(b.worst));
+    for (int i = 0; i < result.length; i++) { result[i].rankWorst = i + 1; }
+    return result;
   }
   static double _med(List<double> v) { final s = List<double>.from(v)..sort(); final m = s.length ~/ 2; return s.length.isOdd ? s[m] : (s[m-1]+s[m])/2; }
 }
@@ -422,7 +447,7 @@ class _TabbedPageState extends State<TabbedPage> {
   }
   
   Future<Map<String, List<KlineDay>>> _runHanPeScreener(List<StockData> allRows) async {
-    print('[SCREENER] Starting hanPE screener...');
+    print('[SCREENER] Starting composite screener...');
     setState(() { _hanPeRunning = true; _hanPeStatus = 'Starting...'; _bigList = []; _smallList = []; _exitList = []; });
     final klineCache = <String, List<KlineDay>>{};
     try {
@@ -432,14 +457,18 @@ class _TabbedPageState extends State<TabbedPage> {
       }
       print('[SCREENER] Total rows: ${allRows.length}');
       setState(() => _hanPeStatus = 'Processing ${allRows.length} rows...');
-      final cands = ScreenerEngine.run(allRows);
+      // Get full ranked list (all valid stocks sorted by worst ascending)
+      final ranked = ScreenerEngine.run(allRows);
+      print('[SCREENER] Valid ranked stocks: ${ranked.length}');
+      // Take top 50 by worst for k-line enrichment (covers rotation band + threshold band)
+      final topN = ranked.take(50).toList();
       final enriched = <StockData>[];
-      for (int i = 0; i < cands.length; i++) {
-        final c = cands[i];
-        setState(() => _hanPeStatus = 'History [${i+1}/${cands.length}] ${c.name}...');
+      for (int i = 0; i < topN.length; i++) {
+        final c = topN[i];
+        setState(() => _hanPeStatus = 'History [${i+1}/${topN.length}] ${c.name}...');
         try {
           final days = await _service.fetchKline(c.code);
-          klineCache[c.code] = days;  // Cache k-line for combined strategy
+          klineCache[c.code] = days;
           if (days.length < weekDays + 1) continue;
           final weekVol = days.sublist(days.length - weekDays).map((d) => d.volume).reduce((a, b) => a + b) / weekDays;
           final yearVol = days.map((d) => d.volume).reduce((a, b) => a + b) / days.length;
@@ -450,19 +479,21 @@ class _TabbedPageState extends State<TabbedPage> {
           enriched.add(c);
         } catch (_) {}
       }
+      // Classify by turnover for informational display
       final big = enriched.where((c) => c.weekYearRatio >= bigRatioMin && c.weekChangePct > 0).toList()
-        ..sort((a, b) => b.weekYearRatio.compareTo(a.weekYearRatio));
+        ..sort((a, b) => a.rankWorst.compareTo(b.rankWorst));
       final small = enriched.where((c) => c.weekYearRatio <= smallRatioMax).toList()
-        ..sort((a, b) => a.weekYearRatio.compareTo(a.weekYearRatio));
-      final midCount = enriched.where((c) => c.weekYearRatio > smallRatioMax && c.weekYearRatio < bigRatioMin).length;
-      final exitList = List<StockData>.from(enriched)..sort((a, b) => a.hanPe.compareTo(b.hanPe));
+        ..sort((a, b) => a.rankWorst.compareTo(b.rankWorst));
+      // Exit list = those in the threshold band (worst < 0.3)
+      final exitList = enriched.where((c) => c.worst < hanpeThreshold).toList()
+        ..sort((a, b) => a.rankWorst.compareTo(b.rankWorst));
       setState(() {
         _bigList = big;
         _smallList = small;
         _exitList = exitList;
         _hanPeStatus = enriched.isEmpty
             ? 'No stocks passed all filters today.'
-            : '大换手 ${big.length}  |  小换手 ${small.length}  |  正常区间 $midCount  |  出场参考 ${exitList.length}';
+            : 'Top-$rotationBand: ${enriched.where((c) => c.rankWorst <= rotationBand).length} in band  |  <0.3: ${exitList.length}  |  大换手 ${big.length}  |  小换手 ${small.length}';
       });
       await _notify();
       print('[SCREENER] Completed successfully');
@@ -477,13 +508,12 @@ class _TabbedPageState extends State<TabbedPage> {
     return klineCache;
   }
   
-  /// Combined strategy: hanPE candidates + trend improvement check.
-  /// Reuses k-lines already fetched by hanPE screener (no extra network calls).
+  /// Composite + upbend: stocks in the rotation band that also pass the trend gate.
+  /// Reuses k-lines already fetched by the composite screener (no extra network calls).
   void _runCombinedScreener(Map<String, List<KlineDay>> klineCache) {
-    print('[COMBINED] Starting combined strategy on ${klineCache.length} cached k-lines...');
+    print('[COMBINED] Starting composite+trend on ${klineCache.length} cached k-lines...');
     setState(() { _combinedRunning = true; _combinedStatus = 'Analyzing trends...'; _combinedResults = []; });
     try {
-      // Get the hanPE candidates from exitList (all enriched hanPE candidates)
       final results = <StockData>[];
       for (final s in _exitList) {
         final days = klineCache[s.code];
@@ -498,12 +528,14 @@ class _TabbedPageState extends State<TabbedPage> {
           results.add(s);
         }
       }
-      results.sort((a, b) => b.slopeDiff.compareTo(a.slopeDiff));
+      // Sort by rank (cheapest first) — the rotation band priority
+      results.sort((a, b) => a.rankWorst.compareTo(b.rankWorst));
+      final inBand = results.where((s) => s.rankWorst <= rotationBand).length;
       setState(() {
         _combinedResults = results;
         _combinedStatus = results.isEmpty
             ? 'No stocks with upward trend.'
-            : '${results.length} cheap stocks rising';
+            : '${results.length} cheap+rising ($inBand in top-$rotationBand band)';
       });
       print('[COMBINED] Found ${results.length} stocks with improving trend');
     } catch (e) {
@@ -661,7 +693,7 @@ class _HanPeResultsView extends StatelessWidget {
             const Spacer(),
             running ? const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2,color:textMuted)) : GestureDetector(onTap: onRefresh, child: const Icon(Icons.refresh, size: 18, color: textMuted)),
           ]),
-          const Text('hanPE < 0.3  |  大换手: 周年比≥2+周涨  |  小换手: 周年比≤0.5', style: TextStyle(color: textMuted, fontSize: 11)),
+          const Text('worst = max(hanPE, hanPB) < 0.3  |  Rank 1-8 = rotation band  |  \u5927\u6362\u624b\u22652+\u5468\u6da8  |  \u5c0f\u6362\u624b\u22640.5', style: TextStyle(color: textMuted, fontSize: 10)),
           const SizedBox(height: 6),
           Text(status, style: const TextStyle(color: textMuted, fontSize: 12)),
         ]),
@@ -669,13 +701,13 @@ class _HanPeResultsView extends StatelessWidget {
       Expanded(child: ListView(
         padding: const EdgeInsets.symmetric(horizontal: 12),
         children: [
-          const Padding(padding: EdgeInsets.only(bottom: 4), child: Text('超低大换手', style: TextStyle(color: accentBlue, fontSize: 14, fontWeight: FontWeight.bold))),
+          const Padding(padding: EdgeInsets.only(bottom: 4), child: Text('高换手 (top-50)', style: TextStyle(color: accentBlue, fontSize: 14, fontWeight: FontWeight.bold))),
           if (bigList.isNotEmpty) ...bigList.map((s) => _HanPeCard(s))
           else const Padding(padding: EdgeInsets.only(bottom: 8), child: Text('今日无符合条件的股票', style: TextStyle(color: textMuted, fontSize: 12))),
-          const Padding(padding: EdgeInsets.only(top: 12, bottom: 4), child: Text('超低小换手', style: TextStyle(color: accentBlue, fontSize: 14, fontWeight: FontWeight.bold))),
+          const Padding(padding: EdgeInsets.only(top: 12, bottom: 4), child: Text('低换手 (top-50)', style: TextStyle(color: accentBlue, fontSize: 14, fontWeight: FontWeight.bold))),
           if (smallList.isNotEmpty) ...smallList.map((s) => _HanPeCard(s))
           else const Padding(padding: EdgeInsets.only(bottom: 8), child: Text('今日无符合条件的股票', style: TextStyle(color: textMuted, fontSize: 12))),
-          const Padding(padding: EdgeInsets.only(top: 12, bottom: 4), child: Text('出场参考', style: TextStyle(color: accentOrange, fontSize: 14, fontWeight: FontWeight.bold))),
+          const Padding(padding: EdgeInsets.only(top: 12, bottom: 4), child: Text('worst < 0.3 (buy band)', style: TextStyle(color: accentOrange, fontSize: 14, fontWeight: FontWeight.bold))),
           if (exitList.isNotEmpty) ...exitList.map((s) => _HanPeCard(s))
           else const Padding(padding: EdgeInsets.only(bottom: 8), child: Text('今日无符合条件的股票', style: TextStyle(color: textMuted, fontSize: 12))),
         ],
@@ -709,7 +741,7 @@ class _CombinedResultsView extends StatelessWidget {
             const Spacer(),
             running ? const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2,color:textMuted)) : GestureDetector(onTap: onRefresh, child: const Icon(Icons.refresh, size: 18, color: textMuted)),
           ]),
-          const Text('hanPE < 0.3  +  近30日上升 且斜率 > 前60日', style: TextStyle(color: textMuted, fontSize: 11)),
+          const Text('worst < 0.3  +  近30日上升 且斜率 > 前60日  (sorted by rank)', style: TextStyle(color: textMuted, fontSize: 11)),
           const SizedBox(height: 6),
           Text(status, style: const TextStyle(color: textMuted, fontSize: 12)),
         ]),
@@ -769,20 +801,26 @@ class _HanPeCard extends StatelessWidget {
   const _HanPeCard(this.s);
   @override
   Widget build(BuildContext context) {
+    final inBand = s.rankWorst <= rotationBand;
+    final bandColor = inBand ? const Color(0xFF4CAF50) : accentBlue;
     final chgColor = s.weekChangePct > 0 ? const Color(0xFFEF5350) : (s.weekChangePct < 0 ? const Color(0xFF66BB6A) : textMuted);
     return Container(margin: const EdgeInsets.only(bottom: 6), padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(color: cardBg, borderRadius: BorderRadius.circular(8), border: Border.all(color: cardBorder)),
+      decoration: BoxDecoration(color: cardBg, borderRadius: BorderRadius.circular(8), border: Border.all(color: inBand ? bandColor : cardBorder)),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
+          Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+            decoration: BoxDecoration(color: bandColor.withOpacity(0.2), borderRadius: BorderRadius.circular(3)),
+            child: Text('#${s.rankWorst}', style: TextStyle(color: bandColor, fontSize: 11, fontWeight: FontWeight.bold))),
+          const SizedBox(width: 6),
           Text(s.code, style: const TextStyle(color: textOffWhite, fontSize: 13, fontWeight: FontWeight.w600)),
-          const SizedBox(width: 8),
+          const SizedBox(width: 6),
           Expanded(child: Text(s.name, style: const TextStyle(color: textOffWhite, fontSize: 13))),
           Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-            decoration: BoxDecoration(color: accentBlue.withOpacity(0.15), borderRadius: BorderRadius.circular(4)),
-            child: Text('hanPE ${s.hanPe.toStringAsFixed(3)}', style: const TextStyle(color: accentBlue, fontSize: 12, fontWeight: FontWeight.bold))),
+            decoration: BoxDecoration(color: bandColor.withOpacity(0.15), borderRadius: BorderRadius.circular(4)),
+            child: Text('worst ${s.worst.toStringAsFixed(3)}', style: TextStyle(color: bandColor, fontSize: 12, fontWeight: FontWeight.bold))),
         ]),
         const SizedBox(height: 8),
-        Row(children: [_M('价格', s.price.toStringAsFixed(2)), _M('PE', s.pe.toStringAsFixed(1)), _M('行业PE', s.industryMedianPe.toStringAsFixed(1)), _M('周年比', s.weekYearRatio.toStringAsFixed(2)), _M('周涨幅', '${s.weekChangePct >= 0 ? '+' : ''}${s.weekChangePct.toStringAsFixed(1)}%', valueColor: chgColor)]),
+        Row(children: [_M('hanPE', s.hanPe.toStringAsFixed(3)), _M('hanPB', s.hanPb.toStringAsFixed(3)), _M('PE', s.pe.toStringAsFixed(1)), _M('PB', s.pb.toStringAsFixed(2)), _M('周年比', s.weekYearRatio.toStringAsFixed(2)), _M('周涨幅', '${s.weekChangePct >= 0 ? '+' : ''}${s.weekChangePct.toStringAsFixed(1)}%', valueColor: chgColor)]),
         const SizedBox(height: 4),
         Row(children: [const Text('行业', style: TextStyle(color: textMuted, fontSize: 10)), const SizedBox(width: 4), Expanded(child: Text(s.industry, style: const TextStyle(color: textOffWhite, fontSize: 11)))]),
       ]),
@@ -798,14 +836,20 @@ class _CombinedCard extends StatelessWidget {
     final isRising = s.recentSlope > 0;
     final trendIcon = isRising ? '↑' : '↓';
     final trendColor = isRising ? const Color(0xFFEF5350) : const Color(0xFFFF9800);
+    final inBand = s.rankWorst <= rotationBand;
+    final bandColor = inBand ? const Color(0xFF4CAF50) : textMuted;
     final priorColor = s.priorChgPct > 0 ? const Color(0xFFEF5350) : (s.priorChgPct < 0 ? const Color(0xFF66BB6A) : textMuted);
     final recentColor = s.recentChgPct > 0 ? const Color(0xFFEF5350) : (s.recentChgPct < 0 ? const Color(0xFF66BB6A) : textMuted);
     return Container(margin: const EdgeInsets.only(bottom: 6), padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(color: cardBg, borderRadius: BorderRadius.circular(8), border: Border.all(color: cardBorder)),
+      decoration: BoxDecoration(color: cardBg, borderRadius: BorderRadius.circular(8), border: Border.all(color: inBand ? const Color(0xFF4CAF50) : cardBorder)),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
+          Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+            decoration: BoxDecoration(color: bandColor.withOpacity(0.2), borderRadius: BorderRadius.circular(3)),
+            child: Text('#${s.rankWorst}', style: TextStyle(color: bandColor, fontSize: 11, fontWeight: FontWeight.bold))),
+          const SizedBox(width: 6),
           Text(s.code, style: const TextStyle(color: textOffWhite, fontSize: 13, fontWeight: FontWeight.w600)),
-          const SizedBox(width: 8),
+          const SizedBox(width: 6),
           Expanded(child: Text(s.name, style: const TextStyle(color: textOffWhite, fontSize: 13))),
           Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
             decoration: BoxDecoration(color: trendColor.withOpacity(0.15), borderRadius: BorderRadius.circular(4)),
@@ -813,9 +857,9 @@ class _CombinedCard extends StatelessWidget {
         ]),
         const SizedBox(height: 8),
         Row(children: [
+          _M('worst', s.worst.toStringAsFixed(3)),
           _M('hanPE', s.hanPe.toStringAsFixed(3)),
-          _M('PE', s.pe.toStringAsFixed(1)),
-          _M('行业PE', s.industryMedianPe.toStringAsFixed(1)),
+          _M('hanPB', s.hanPb.toStringAsFixed(3)),
         ]),
         const SizedBox(height: 4),
         Row(children: [
