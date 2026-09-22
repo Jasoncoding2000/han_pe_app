@@ -477,7 +477,7 @@ class _TabbedPageState extends State<TabbedPage> {
           c.weekYearRatio = weekVol / yearVol;
           c.weekChangePct = (days.last.close / prevClose - 1) * 100;
           enriched.add(c);
-        } catch (_) {}
+        } catch (e) { print('[ENRICH] skipped a stock during enrichment: $e'); }
       }
       // Classify by turnover for informational display
       final big = enriched.where((c) => c.weekYearRatio >= bigRatioMin && c.weekChangePct > 0).toList()
