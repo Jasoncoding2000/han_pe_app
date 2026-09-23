@@ -101,7 +101,9 @@ class SinaService {
   }
   Future<List<Map<String, String>>> fetchSectors() async {
     final text = await _getGbk('/q/view/newSinaHy.php');
-    final jsonStr = text.substring(text.indexOf('{'));
+    final braceIndex = text.indexOf('{');
+    if (braceIndex < 0) return [];
+    final jsonStr = text.substring(braceIndex);
     final Map<String, dynamic> data = json.decode(jsonStr);
     final sectors = <Map<String, String>>[];
     data.forEach((label, value) {
@@ -410,6 +412,7 @@ class _TabbedPageState extends State<TabbedPage> {
     List<StockData> allRows;
     try {
       sectors = await _service.fetchSectors();
+      if (!mounted) return;
       print('[APP] Found ${sectors.length} sectors. Fetching stocks...');
       setState(() {
         _hanPeStatus = 'Found ${sectors.length} industries. Fetching stocks...';
@@ -418,6 +421,7 @@ class _TabbedPageState extends State<TabbedPage> {
       allRows = <StockData>[];
       for (int i = 0; i < sectors.length; i++) {
         final s = sectors[i];
+        if (!mounted) return;
         setState(() {
           _hanPeStatus = '[${i+1}/${sectors.length}] ${s['name']}...';
           _combinedStatus = '[${i+1}/${sectors.length}] ${s['name']}...';
@@ -425,9 +429,11 @@ class _TabbedPageState extends State<TabbedPage> {
         });
         try { allRows.addAll(await _service.fetchSectorStocks(s['label']!, s['name']!)); } catch (e) { print('[APP] Error: $e'); }
       }
+      if (!mounted) return;
       print('[APP] Fetched ${allRows.length} total stocks. Starting both screeners in parallel...');
     } catch (e) {
       print('[APP] Shared data fetch failed: $e');
+      if (!mounted) return;
       setState(() {
         _hanPeRunning = false; _hanPeStatus = 'Error: $e';
         _combinedRunning = false; _combinedStatus = 'Error: $e';
@@ -440,6 +446,7 @@ class _TabbedPageState extends State<TabbedPage> {
     // 2. Combined (instant, reuses hanPE k-lines) → shows results immediately after hanPE
     // 3. V-Shape (slow, ~3min, scans all stocks) → runs last in background
     final klineCache = await _runHanPeScreener(allRows);
+    if (!mounted) return;
     _runCombinedScreener(klineCache);
     await _runVShapeScreener(allRows);
   }
@@ -463,6 +470,7 @@ class _TabbedPageState extends State<TabbedPage> {
       final enriched = <StockData>[];
       for (int i = 0; i < topN.length; i++) {
         final c = topN[i];
+        if (!mounted) return klineCache;
         setState(() => _hanPeStatus = 'History [${i+1}/${topN.length}] ${c.name}...');
         try {
           final days = await _service.fetchKline(c.code);
@@ -485,6 +493,7 @@ class _TabbedPageState extends State<TabbedPage> {
       // Exit list = those in the threshold band (worst < 0.3)
       final exitList = enriched.where((c) => c.worst < hanpeThreshold).toList()
         ..sort((a, b) => a.rankWorst.compareTo(b.rankWorst));
+      if (!mounted) return klineCache;
       setState(() {
         _bigList = big;
         _smallList = small;
@@ -497,11 +506,12 @@ class _TabbedPageState extends State<TabbedPage> {
       print('[SCREENER] Completed successfully');
     } catch (e) { 
       print('[SCREENER] ERROR: $e');
+      if (!mounted) return klineCache;
       setState(() => _hanPeStatus = 'Error: $e'); 
     }
     finally { 
       print('[SCREENER] Finished, running=false');
-      setState(() => _hanPeRunning = false); 
+      if (mounted) setState(() => _hanPeRunning = false);
     }
     return klineCache;
   }
@@ -563,6 +573,7 @@ class _TabbedPageState extends State<TabbedPage> {
       int klineErrors = 0;
       for (int i = 0; i < filtered.length; i++) {
         final s = filtered[i];
+        if (!mounted) return;
         if (i % 100 == 0) setState(() => _vShapeStatus = 'V-Shape [$i/${filtered.length}]...');
         try {
           final days = await _service.fetchKline(s.code);
@@ -591,6 +602,7 @@ class _TabbedPageState extends State<TabbedPage> {
       }
       print('[VSHAPE] Scan complete: ${candidates.length} candidates, $klineErrors kline errors');
       candidates.sort((a, b) => b.steepnessRatio.compareTo(a.steepnessRatio));
+      if (!mounted) return;
       setState(() {
         _vShapeResults = candidates;
         _vShapeStatus = candidates.isEmpty
@@ -601,11 +613,12 @@ class _TabbedPageState extends State<TabbedPage> {
       print('[VSHAPE] Completed successfully');
     } catch (e) { 
       print('[VSHAPE] ERROR: $e');
+      if (!mounted) return;
       setState(() => _vShapeStatus = 'Error: $e'); 
     }
     finally { 
       print('[VSHAPE] Finished, running=false');
-      setState(() => _vShapeRunning = false); 
+      if (mounted) setState(() => _vShapeRunning = false);
     }
   }
   
@@ -817,14 +830,14 @@ class _HanPeCard extends StatelessWidget {
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
           Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-            decoration: BoxDecoration(color: bandColor.withOpacity(0.2), borderRadius: BorderRadius.circular(3)),
+            decoration: BoxDecoration(color: bandColor.withValues(alpha: 0.2), borderRadius: BorderRadius.circular(3)),
             child: Text('#${s.rankWorst}', style: TextStyle(color: bandColor, fontSize: 11, fontWeight: FontWeight.bold))),
           const SizedBox(width: 6),
           Text(s.code, style: const TextStyle(color: textOffWhite, fontSize: 13, fontWeight: FontWeight.w600)),
           const SizedBox(width: 6),
           Expanded(child: Text(s.name, style: const TextStyle(color: textOffWhite, fontSize: 13))),
           Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-            decoration: BoxDecoration(color: bandColor.withOpacity(0.15), borderRadius: BorderRadius.circular(4)),
+            decoration: BoxDecoration(color: bandColor.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(4)),
             child: Text('worst ${s.worst.toStringAsFixed(3)}', style: TextStyle(color: bandColor, fontSize: 12, fontWeight: FontWeight.bold))),
         ]),
         const SizedBox(height: 8),
@@ -853,14 +866,14 @@ class _CombinedCard extends StatelessWidget {
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
           Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-            decoration: BoxDecoration(color: bandColor.withOpacity(0.2), borderRadius: BorderRadius.circular(3)),
+            decoration: BoxDecoration(color: bandColor.withValues(alpha: 0.2), borderRadius: BorderRadius.circular(3)),
             child: Text('#${s.rankWorst}', style: TextStyle(color: bandColor, fontSize: 11, fontWeight: FontWeight.bold))),
           const SizedBox(width: 6),
           Text(s.code, style: const TextStyle(color: textOffWhite, fontSize: 13, fontWeight: FontWeight.w600)),
           const SizedBox(width: 6),
           Expanded(child: Text(s.name, style: const TextStyle(color: textOffWhite, fontSize: 13))),
           Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-            decoration: BoxDecoration(color: trendColor.withOpacity(0.15), borderRadius: BorderRadius.circular(4)),
+            decoration: BoxDecoration(color: trendColor.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(4)),
             child: Text('$trendIcon ${s.slopeDiff.toStringAsFixed(3)}', style: TextStyle(color: trendColor, fontSize: 12, fontWeight: FontWeight.bold))),
         ]),
         const SizedBox(height: 8),
@@ -896,7 +909,7 @@ class _VCard extends StatelessWidget {
           const SizedBox(width: 8),
           Expanded(child: Text(s.name, style: const TextStyle(color: textOffWhite, fontSize: 13))),
           Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-            decoration: BoxDecoration(color: accentOrange.withOpacity(0.15), borderRadius: BorderRadius.circular(4)),
+            decoration: BoxDecoration(color: accentOrange.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(4)),
             child: Text('${s.steepnessRatio.toStringAsFixed(1)}x', style: const TextStyle(color: accentOrange, fontSize: 12, fontWeight: FontWeight.bold))),
         ]),
         const SizedBox(height: 8),
