@@ -60,7 +60,7 @@ class HanPeApp extends StatelessWidget {
 
 class StockData {
   final String code, name, industry;
-  final double price, pe, pb, turnover;
+  final double price, pe, pb, turnover, amount;
   double industryMedianPe, industryMedianPb, hanPe, hanPb, worst;
   int rankWorst = 0;
   double weekYearRatio = 0, weekChangePct = 0;
@@ -70,7 +70,7 @@ class StockData {
   // Combined strategy fields
   double recentSlope = 0, priorSlope = 0, slopeDiff = 0;
   double recentChgPct = 0, priorChgPct = 0;
-  StockData({required this.code, required this.name, required this.price, required this.pe, required this.pb, required this.turnover, required this.industry, this.industryMedianPe = 0, this.industryMedianPb = 0, this.hanPe = 0, this.hanPb = 0, this.worst = 0});
+  StockData({required this.code, required this.name, required this.price, required this.pe, required this.pb, required this.turnover, required this.industry, this.amount = 0, this.industryMedianPe = 0, this.industryMedianPb = 0, this.hanPe = 0, this.hanPb = 0, this.worst = 0});
 }
 
 class KlineDay {
@@ -140,9 +140,10 @@ class SinaService {
         final pe = _sd(item['per']);
         final pb = _sd(item['pbs']) ?? _sd(item['pb']);  // Sina uses 'pbs' for 市净率
         final turnover = _sd(item['turnoverratio']);
+        final amount = _sd(item['amount']) ?? 0;  // 成交额 (万元)
         final name = item['name'] as String? ?? '';
         if (price != null && pe != null && turnover != null) {
-          stocks.add(StockData(code: code, name: name, price: price, pe: pe, pb: pb ?? 0, turnover: turnover, industry: industryName));
+          stocks.add(StockData(code: code, name: name, price: price, pe: pe, pb: pb ?? 0, turnover: turnover, industry: industryName, amount: amount));
         }
       }
       if (data.length < num) break;
@@ -224,6 +225,25 @@ class ScreenerEngine {
     return result;
   }
   static double _med(List<double> v) { final s = List<double>.from(v)..sort(); final m = s.length ~/ 2; return s.length.isOdd ? s[m] : (s[m-1]+s[m])/2; }
+}
+
+/// 龙头 (sector leader): the highest 成交额 (amount) stock in each industry.
+/// Must run AFTER ScreenerEngine.run so hanPe is already computed in place.
+/// Result is sorted by hanPE ascending (rank 1 = cheapest leader).
+class LeaderEngine {
+  static List<StockData> pick(List<StockData> allRows) {
+    final leaderOf = <String, StockData>{};
+    for (final r in allRows) {
+      if (!RegExp(r'^(60|00[0-3])').hasMatch(r.code)) continue;
+      if (RegExp(r'ST|st|\*ST|退', caseSensitive: false).hasMatch(r.name)) continue;
+      if (r.price <= 0 || r.industry.isEmpty) continue;
+      if (r.pe <= 0 || r.hanPe <= 0 || !r.hanPe.isFinite) continue;
+      if (r.amount <= 0) continue;
+      final cur = leaderOf[r.industry];
+      if (cur == null || r.amount > cur.amount) leaderOf[r.industry] = r;
+    }
+    return leaderOf.values.toList()..sort((a, b) => a.hanPe.compareTo(b.hanPe));
+  }
 }
 
 class VShapeEngine {
@@ -395,6 +415,10 @@ class _TabbedPageState extends State<TabbedPage> {
   String _vShapeStatus = '';
   bool _vShapeRunning = false;
   
+  // 龙头 (sector leaders) results — pure computation, no extra HTTP
+  List<StockData> _leaderResults = [];
+  String _leaderStatus = '';
+  
   @override
   void initState() {
     super.initState();
@@ -407,6 +431,7 @@ class _TabbedPageState extends State<TabbedPage> {
       _hanPeRunning = true; _hanPeStatus = 'Fetching industry sectors...';
       _combinedRunning = true; _combinedStatus = 'Waiting for hanPE...';
       _vShapeRunning = true; _vShapeStatus = 'Fetching industry sectors...';
+      _leaderResults = []; _leaderStatus = 'Waiting for hanPE...';
     });
     List<Map<String, String>> sectors;
     List<StockData> allRows;
@@ -460,6 +485,16 @@ class _TabbedPageState extends State<TabbedPage> {
       // Get full ranked list (all valid stocks sorted by worst ascending)
       final ranked = ScreenerEngine.run(allRows);
       print('[SCREENER] Valid ranked stocks: ${ranked.length}');
+      // 龙头 list: highest-成交额 stock per industry, ranked by hanPE.
+      // Runs on the same rows ScreenerEngine just annotated in place — instant, no network.
+      final leaders = LeaderEngine.pick(allRows);
+      setState(() {
+        _leaderResults = leaders;
+        _leaderStatus = leaders.isEmpty
+            ? 'No leaders computed.'
+            : '${leaders.length} sector leaders  |  cheapest hanPE: ${leaders.first.name} ${leaders.first.hanPe.toStringAsFixed(3)}';
+      });
+      print('[LEADER] Picked ${leaders.length} sector leaders');
       // Take top 50 by worst for k-line enrichment (covers rotation band + threshold band)
       final topN = ranked.take(50).toList();
       final enriched = <StockData>[];
@@ -626,12 +661,12 @@ class _TabbedPageState extends State<TabbedPage> {
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 3,
+      length: 4,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('hanPE Screener'), centerTitle: true,
           bottom: const TabBar(
-            tabs: [Tab(text: 'hanPE'), Tab(text: 'Upbend'), Tab(text: 'V-Shape')],
+            tabs: [Tab(text: 'hanPE'), Tab(text: 'Upbend'), Tab(text: 'V-Shape'), Tab(text: '龙头')],
             indicatorColor: accentBlue,
             labelColor: accentBlue,
             unselectedLabelColor: textMuted,
@@ -657,6 +692,10 @@ class _TabbedPageState extends State<TabbedPage> {
             status: _vShapeStatus,
             running: _vShapeRunning,
             onRefresh: _runBothScreeners,
+          ),
+          _LeaderResultsView(
+            results: _leaderResults,
+            status: _leaderStatus,
           ),
         ]),
       ),
@@ -799,6 +838,64 @@ class _VShapeResultsView extends StatelessWidget {
         children: results.map((s) => _VCard(s)).toList(),
       )),
     ]);
+  }
+}
+
+class _LeaderResultsView extends StatelessWidget {
+  final List<StockData> results;
+  final String status;
+  
+  const _LeaderResultsView({required this.results, required this.status});
+  
+  @override
+  Widget build(BuildContext context) {
+    return Column(children: [
+      Padding(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.center, children: [
+          const Text('龙头 = 成交额最大股 / 行业  |  sorted by hanPE ↑', style: TextStyle(color: textMuted, fontSize: 10)),
+          const SizedBox(height: 6),
+          Text(status, style: const TextStyle(color: textMuted, fontSize: 12)),
+        ]),
+      ),
+      Expanded(child: ListView(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        children: results.isEmpty
+            ? [const Padding(padding: EdgeInsets.only(bottom: 8), child: Text('等待 hanPE 扫描完成', style: TextStyle(color: textMuted, fontSize: 12)))]
+            : results.asMap().entries.map((e) => _LeaderCard(e.value, e.key + 1)).toList(),
+      )),
+    ]);
+  }
+}
+
+class _LeaderCard extends StatelessWidget {
+  final StockData s;
+  final int rank;
+  const _LeaderCard(this.s, this.rank);
+  @override
+  Widget build(BuildContext context) {
+    final cheap = s.hanPe < hanpeThreshold;
+    final col = cheap ? const Color(0xFF4CAF50) : accentBlue;
+    return Container(margin: const EdgeInsets.only(bottom: 6), padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(color: cardBg, borderRadius: BorderRadius.circular(8), border: Border.all(color: cheap ? col : cardBorder)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Container(padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+            decoration: BoxDecoration(color: col.withOpacity(0.2), borderRadius: BorderRadius.circular(3)),
+            child: Text('#$rank', style: TextStyle(color: col, fontSize: 11, fontWeight: FontWeight.bold))),
+          const SizedBox(width: 6),
+          Text(s.code, style: const TextStyle(color: textOffWhite, fontSize: 13, fontWeight: FontWeight.w600)),
+          const SizedBox(width: 6),
+          Expanded(child: Text(s.name, style: const TextStyle(color: textOffWhite, fontSize: 13))),
+          Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(color: col.withOpacity(0.15), borderRadius: BorderRadius.circular(4)),
+            child: Text('hanPE ${s.hanPe.toStringAsFixed(3)}', style: TextStyle(color: col, fontSize: 12, fontWeight: FontWeight.bold))),
+        ]),
+        const SizedBox(height: 8),
+        Row(children: [_M('PE', s.pe.toStringAsFixed(1)), _M('PB', s.pb.toStringAsFixed(2)), _M('成交额', '${(s.amount / 10000).toStringAsFixed(2)}亿'), _M('换手%', s.turnover.toStringAsFixed(2)), _M('价格', s.price.toStringAsFixed(2))]),
+        const SizedBox(height: 4),
+        Row(children: [const Text('行业', style: TextStyle(color: textMuted, fontSize: 10)), const SizedBox(width: 4), Expanded(child: Text(s.industry, style: const TextStyle(color: textOffWhite, fontSize: 11)))]),
+      ]),
+    );
   }
 }
 
